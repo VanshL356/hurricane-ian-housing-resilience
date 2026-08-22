@@ -4,25 +4,36 @@ Can pre-disaster housing and economic conditions predict which local housing mar
 
 This project combines Zillow housing values, NOAA Storm Events damage estimates, and county economic data to measure and predict housing-market resilience following Hurricane Ian in 2022.
 
-The analysis covers **293 counties across Florida, Georgia, and Alabama from 2016–2024**, with a focused case study of **20 Hurricane Ian-exposed Florida counties**.
+The analysis covers **293 counties across Florida, Alabama Georgia from 2016–2024**, with a focused case study of **20 Hurricane Ian-exposed Florida counties**.
 
 ---
 
 ## Project Summary
 
-Built a county-level housing resilience index based on four dimensions of post-September-2022 market performance:
+Built a county-level housing resilience index based on four dimensions of
+post-September-2022 market performance:
 
 - 24-month home-value appreciation
 - maximum drawdown from the September 2022 baseline
 - number of months below the pre-event baseline
 - post-event housing-price volatility
 
-Used only **pre-Ian information** to predict resilience using:
+I then used pre-Ian housing and economic characteristics to predict subsequent
+resilience.
 
-- Linear regression
-- Elastic net
-- Random forest
-- Equal-weight ensemble
+The project uses two related prediction designs:
+
+1. **Regional predictive performance:** Linear regression, elastic net, and
+   random forest models are evaluated across 281 counties in Florida, Alabama and
+   Georgia using state-stratified 10-fold cross-validation.
+
+3. **Hurricane Ian case study:** All 20 designated Ian-exposed Florida counties
+   are removed from model training. Benchmark models are trained on 198 Georgia
+   and Florida counties outside the designated Ian group, and then used to
+   predict resilience for the 20 completely held-out Ian counties.
+
+This separates the general predictive-performance question from the
+Ian-specific benchmarking exercise.
 
 Models were evaluated using **state-stratified 10-fold cross-validation**.
 
@@ -61,7 +72,7 @@ Random-forest permutation importance indicates that the strongest predictive fea
 4. State
 5. 24-month pre-Ian housing return
 
-Recent housing-market dynamics were more informative than most static socioeconomic characteristics.
+Recent housing-market dynamics were more informative than most static economic characteristics.
 
 This suggests that the market's trajectory entering the event contained substantial information about subsequent resilience.
 
@@ -69,44 +80,66 @@ This suggests that the market's trajectory entering the event contained substant
 
 ## Hurricane Ian Case Study
 
-The predictive models provide an expected resilience score for each county based only on conditions observed before Hurricane Ian.
+For the disaster case study, the 20 designated Hurricane Ian-exposed Florida
+counties are treated as a completely held-out sample.
 
-I define:
+The benchmark models are trained on **198 counties in Georgia and Florida
+outside the designated Ian group**. None of the 20 Ian counties contribute to
+model estimation or elastic-net tuning.
 
-**Unexpected Resilience = Actual Resilience − Out-of-Fold Predicted Resilience**
+For each Ian county:
 
-Positive values indicate that a county performed better than expected.
+**Unexpected Resilience = Actual Resilience − Predicted Resilience**
 
-Negative values indicate that a county was less resilient than its pre-Ian characteristics predicted.
+Positive values indicate greater resilience than predicted from pre-Ian
+fundamentals. Negative values indicate less resilience than predicted.
 
 ### Actual vs. Predicted Resilience
 
 ![Actual vs Predicted Resilience](figures/03_florida_actual_vs_predicted.png)
 
-Several counties experienced substantially lower resilience than predicted by their pre-Ian fundamentals.
+Several counties substantially underperformed the regional benchmark.
+Charlotte, Flagler, Sarasota, Lee, and Manatee exhibited some of the largest
+negative prediction errors.
 
-Charlotte, Sarasota, Lee, Manatee, and Flagler were among the more notable negative prediction errors, while counties including Highlands, Hardee, Hendry, Okeechobee, Seminole, and Orange performed better than expected.
-
+Other exposed counties, including Highlands, Hardee, Okeechobee, Hendry,
+Glades, and Seminole, were more resilient than the benchmark predicted.
 ---
 
 ## Does Hurricane Damage Help Explain Unexpected Resilience?
 
 ![Damage and Unexpected Resilience](figures/04_damage_unexpected_resilience.png)
 
-Among the 20 Ian-exposed Florida counties, higher NOAA property damage per capita was associated with lower-than-predicted housing resilience.
+Higher NOAA property damage per capita was associated with lower-than-predicted
+housing resilience among the 20 Ian-exposed Florida counties.
 
-The continuous relationship was directionally negative but statistically imprecise:
+The continuous relationship was negative but imprecisely estimated:
 
-- Spearman correlation: **ρ = -0.315**
-- p-value: **0.176**
-- OLS damage coefficient: approximately **-0.047**
-- OLS p-value: approximately **0.257**
+- Spearman correlation: **ρ = -0.305**
+- Spearman p-value: **0.192**
+- OLS damage coefficient: **-0.064**
+- OLS p-value: **0.126**
+- OLS R²: **0.125**
 
-The small 20-county case-study sample limits statistical precision, so these estimates are interpreted as descriptive rather than causal.
+Given the small 20-county sample, these estimates are interpreted as
+descriptive rather than causal.
 
-An exploratory comparison between the five counties with at least **$2,000 in reported NOAA property damage per capita** and the remaining exposed counties produced a Wilcoxon rank-sum p-value of approximately **0.036**.
+### Exploratory Severe-Damage Comparison
 
-Because this threshold was chosen descriptively rather than preregistered, the result is treated as exploratory.
+The five counties with at least **$2,000 in reported NOAA property damage per
+capita** had substantially lower unexpected resilience than the remaining 15
+Ian-exposed counties.
+
+| Group | N | Mean Unexpected Resilience | Median Unexpected Resilience |
+|---|---:|---:|---:|
+| Other Ian-exposed counties | 15 | -0.047 | -0.183 |
+| Severe-damage counties | 5 | -0.781 | -0.891 |
+
+The difference was significant in an exploratory Wilcoxon rank-sum comparison
+(**p = 0.029**).
+
+Because the $2,000-per-capita threshold was selected descriptively rather than
+preregistered, this result should be interpreted as exploratory.
 
 ---
 
@@ -170,7 +203,7 @@ County damage intensity was then defined as:
 
 **Reported Ian Property Damage / 2022 County Population**
 
-### Socioeconomic Features
+### Economic Features
 
 Pre-Ian predictors include:
 
@@ -188,38 +221,36 @@ Pre-Ian predictors include:
 
 ## Modeling Strategy
 
-The final modeling sample contains **281 counties** with complete predictor and resilience information:
+### Regional Prediction
+
+The general modeling sample contains **281 counties** with complete predictor
+and resilience information:
 
 - Alabama: 63
 - Florida: 63
 - Georgia: 155
 
-All predictive features are measured before Hurricane Ian.
+Linear regression, elastic net, and random forest models are evaluated using
+state-stratified 10-fold cross-validation.
 
-Out-of-fold predictions were generated using state-stratified 10-fold cross-validation so that each county's prediction was produced by a model that did not train on that county.
+The equal-weight ensemble achieves a cross-validated R² of **0.531**.
 
-Elastic-net hyperparameters were selected using an inner cross-validation loop within each outer training fold.
+### Hurricane Ian Holdout
 
-The final prediction for each county is the equal-weight average of the linear regression, elastic-net, and random-forest predictions.
+For the Ian case study, all 20 designated Ian-exposed Florida counties are
+removed before model estimation.
 
----
+The primary benchmark contains:
 
-## Why This Is Not Presented as a Causal DiD Study
+- Florida counties outside the designated Ian group: 43
+- Georgia counties: 155
+- Total training counties: **198**
 
-An earlier version of the project evaluated difference-in-differences, synthetic difference-in-differences, matched event-study designs, and pretrend adjustments.
+Linear regression, elastic net, and random forest models are fit to those 198
+counties. Elastic-net tuning uses only the benchmark training sample.
 
-Those diagnostics consistently showed substantial differential pre-treatment housing trends between highly affected Florida counties and available comparison markets.
-
-Because those patterns undermine the parallel-trends assumption required for credible causal interpretation, I did not present the post-Ian differences as causal effects.
-
-Instead, the project was reframed around:
-
-- measurement of housing-market resilience
-- out-of-sample prediction
-- prediction-error analysis
-- descriptive disaster-damage heterogeneity
-
-This avoids imposing a causal interpretation that the data do not support.
+The three predictions are averaged to generate the final benchmark prediction
+for each completely held-out Ian county.
 
 ---
 
@@ -232,6 +263,28 @@ The Hurricane Ian case study contains only 20 counties, which limits statistical
 The resilience index is researcher-defined, although alternative weighting schemes and a PCA specification produce very similar county rankings.
 
 The predictive models identify relationships useful for forecasting and benchmarking; they do not establish causal effects of individual predictors or Hurricane Ian damage.
+
+---
+
+## Key Takeaway
+
+Pre-Ian housing-market conditions contain meaningful information about
+subsequent county housing resilience. A cross-validated ensemble explains about
+**53% of held-out variation** across the broader southeastern sample, with
+recent housing appreciation and volatility among the strongest predictors.
+
+When the 20 Hurricane Ian-exposed Florida counties are excluded entirely from
+model training, several heavily damaged markets—especially Charlotte, Lee,
+Sarasota, and Manatee—substantially underperform their predicted resilience.
+
+Across the Ian counties, greater NOAA property damage is directionally
+associated with lower unexpected resilience. The continuous relationship is
+imprecisely estimated in the small 20-county sample, while the five
+highest-damage counties show substantially lower unexpected resilience in an
+exploratory group comparison.
+
+These conclusions remain essentially unchanged when Alabama is removed from
+the benchmark training sample.
 
 ---
 
