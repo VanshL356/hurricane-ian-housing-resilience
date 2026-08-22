@@ -1,1 +1,582 @@
+# ==============================================================================
+# 01_build_panel.R
+#
+# Input:
+#   data/Synth_Data.csv
+#
+# Output:
+#   data/panel_clean.rds
+#
+# Expected data:
+#   293 counties
+#   108 months
+#   January 2016 - December 2024
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+library(lubridate)
+
+
+# ------------------------------------------------------------------------------
+# 1. File paths
+# ------------------------------------------------------------------------------
+
+input_file <- "data/Synth_Data.csv"
+
+output_file <- "data/panel_clean.rds"
+
+
+# ------------------------------------------------------------------------------
+# 2. Confirm that the raw file exists
+# ------------------------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+
+  stop(
+    paste0(
+      "\nCould not find: ",
+      input_file,
+      "\n\nPlace Synth_Data.csv inside the data/ folder ",
+      "before running this script."
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. Import raw panel
+# ------------------------------------------------------------------------------
+
+panel_raw <- read_csv(
+  input_file,
+  show_col_types = FALSE
+)
+
+
+cat("\n========================================\n")
+cat("RAW DATA IMPORTED\n")
+cat("========================================\n")
+
+cat("Rows:", nrow(panel_raw), "\n")
+cat("Columns:", ncol(panel_raw), "\n\n")
+
+print(names(panel_raw))
+
+
+# ------------------------------------------------------------------------------
+# 4. Verify required variables
+# ------------------------------------------------------------------------------
+
+required_columns <- c(
+  "County",
+  "State",
+  "Date",
+  "Year",
+  "Median Household Income",
+  "Population",
+  "Unemployment Rate",
+  "Treatment",
+  "log_ZHVI"
+)
+
+
+missing_columns <- setdiff(
+  required_columns,
+  names(panel_raw)
+)
+
+
+if (length(missing_columns) > 0) {
+
+  stop(
+    paste(
+      "Missing required columns:",
+      paste(missing_columns, collapse = ", ")
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 5. Clean variables
+# ------------------------------------------------------------------------------
+
+panel_clean <- panel_raw %>%
+
+  mutate(
+
+    # Remove accidental spaces from geographic identifiers
+    County = trimws(County),
+
+    State = toupper(
+      trimws(State)
+    ),
+
+    # Convert date safely
+    Date = as.Date(Date),
+
+    # Ensure numeric variables are numeric
+    Year = as.integer(Year),
+
+    `Median Household Income` =
+      as.numeric(`Median Household Income`),
+
+    Population =
+      as.numeric(Population),
+
+    `Unemployment Rate` =
+      as.numeric(`Unemployment Rate`),
+
+    Treatment =
+      as.integer(Treatment),
+
+    log_ZHVI =
+      as.numeric(log_ZHVI),
+
+    # State-aware county identifier.
+    #
+    # This is critical because counties such as Baldwin,
+    # Calhoun, Monroe, etc. occur in multiple states.
+    County_ID =
+      paste0(
+        County,
+        "_",
+        State
+      )
+  ) %>%
+
+  arrange(
+    County_ID,
+    Date
+  )
+
+
+# ------------------------------------------------------------------------------
+# 6. Basic panel diagnostics
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("PANEL DIAGNOSTICS\n")
+cat("========================================\n")
+
+cat(
+  "Observations:",
+  nrow(panel_clean),
+  "\n"
+)
+
+cat(
+  "Unique counties:",
+  n_distinct(panel_clean$County_ID),
+  "\n"
+)
+
+cat(
+  "Unique months:",
+  n_distinct(panel_clean$Date),
+  "\n"
+)
+
+cat(
+  "First month:",
+  as.character(min(panel_clean$Date, na.rm = TRUE)),
+  "\n"
+)
+
+cat(
+  "Last month:",
+  as.character(max(panel_clean$Date, na.rm = TRUE)),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 7. Check balanced county-month structure
+# ------------------------------------------------------------------------------
+
+n_counties <- n_distinct(
+  panel_clean$County_ID
+)
+
+n_months <- n_distinct(
+  panel_clean$Date
+)
+
+expected_rows <-
+  n_counties * n_months
+
+
+cat(
+  "\nExpected observations for balanced panel:",
+  expected_rows,
+  "\n"
+)
+
+cat(
+  "Actual observations:",
+  nrow(panel_clean),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 8. Check duplicate county-month observations
+# ------------------------------------------------------------------------------
+
+duplicate_county_month <- panel_clean %>%
+
+  count(
+    County_ID,
+    Date,
+    name = "n"
+  ) %>%
+
+  filter(
+    n > 1
+  )
+
+
+cat(
+  "\nDuplicate county-month combinations:",
+  nrow(duplicate_county_month),
+  "\n"
+)
+
+
+if (nrow(duplicate_county_month) > 0) {
+
+  print(
+    duplicate_county_month
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 9. Missing-value diagnostics
+# ------------------------------------------------------------------------------
+
+missing_summary <- panel_clean %>%
+
+  summarise(
+    Missing_County =
+      sum(is.na(County)),
+
+    Missing_State =
+      sum(is.na(State)),
+
+    Missing_Date =
+      sum(is.na(Date)),
+
+    Missing_Income =
+      sum(is.na(`Median Household Income`)),
+
+    Missing_Population =
+      sum(is.na(Population)),
+
+    Missing_Unemployment =
+      sum(is.na(`Unemployment Rate`)),
+
+    Missing_Treatment =
+      sum(is.na(Treatment)),
+
+    Missing_log_ZHVI =
+      sum(is.na(log_ZHVI))
+  )
+
+
+cat("\n========================================\n")
+cat("MISSING VALUES\n")
+cat("========================================\n")
+
+print(missing_summary)
+
+
+# ------------------------------------------------------------------------------
+# 10. ZHVI missingness by county
+# ------------------------------------------------------------------------------
+
+zhvi_missing_by_county <- panel_clean %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  summarise(
+    Observations = n(),
+
+    Missing_ZHVI =
+      sum(is.na(log_ZHVI)),
+
+    .groups = "drop"
+  ) %>%
+
+  filter(
+    Missing_ZHVI > 0
+  ) %>%
+
+  arrange(
+    desc(Missing_ZHVI)
+  )
+
+
+cat(
+  "\nCounties with at least one missing ZHVI observation:",
+  nrow(zhvi_missing_by_county),
+  "\n"
+)
+
+print(
+  zhvi_missing_by_county,
+  n = Inf
+)
+
+
+# ------------------------------------------------------------------------------
+# 11. Validate treatment structure
+# ------------------------------------------------------------------------------
+
+treatment_by_county <- panel_clean %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  summarise(
+
+    Ever_Treated =
+      max(
+        Treatment,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+
+treated_counties <- treatment_by_county %>%
+
+  filter(
+    Ever_Treated == 1
+  )
+
+
+cat("\n========================================\n")
+cat("TREATMENT DIAGNOSTICS\n")
+cat("========================================\n")
+
+cat(
+  "Number of treated counties:",
+  nrow(treated_counties),
+  "\n"
+)
+
+print(
+  treated_counties$County_ID
+)
+
+
+# ------------------------------------------------------------------------------
+# 12. Treatment start date for every treated county
+# ------------------------------------------------------------------------------
+
+treatment_start_dates <- panel_clean %>%
+
+  filter(
+    Treatment == 1
+  ) %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  summarise(
+
+    Treatment_Start =
+      min(Date),
+
+    .groups = "drop"
+  )
+
+
+cat("\nTreatment start dates:\n")
+
+print(
+  treatment_start_dates
+)
+
+
+cat(
+  "\nUnique treatment start dates:\n"
+)
+
+print(
+  unique(
+    treatment_start_dates$Treatment_Start
+  )
+)
+
+
+# ------------------------------------------------------------------------------
+# 13. Verify expected October 2022 treatment timing
+# ------------------------------------------------------------------------------
+
+unexpected_treatment_dates <- treatment_start_dates %>%
+
+  filter(
+    Treatment_Start != as.Date("2022-10-01")
+  )
+
+
+if (nrow(unexpected_treatment_dates) == 0) {
+
+  cat(
+    "\nAll treated counties begin treatment on 2022-10-01.\n"
+  )
+
+} else {
+
+  cat(
+    "\nWARNING: Unexpected treatment dates found:\n"
+  )
+
+  print(
+    unexpected_treatment_dates
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 14. Check treated counties for missing ZHVI
+# ------------------------------------------------------------------------------
+
+treated_missing_zhvi <- panel_clean %>%
+
+  filter(
+    County_ID %in% treated_counties$County_ID,
+    is.na(log_ZHVI)
+  )
+
+
+cat(
+  "\nTreated county-month observations with missing ZHVI:",
+  nrow(treated_missing_zhvi),
+  "\n"
+)
+
+
+if (nrow(treated_missing_zhvi) > 0) {
+
+  print(
+    treated_missing_zhvi %>%
+      select(
+        County_ID,
+        Date,
+        log_ZHVI
+      )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 15. Add variables useful throughout the project
+# ------------------------------------------------------------------------------
+
+panel_clean <- panel_clean %>%
+
+  mutate(
+
+    County_Upper =
+      toupper(
+        trimws(County)
+      ),
+
+    Post_Ian =
+      as.integer(
+        Date >= as.Date("2022-10-01")
+      ),
+
+    # Month index relative to September 2022.
+    #
+    # September 2022 = -1
+    # October 2022   = 0
+    # November 2022  = 1
+    # etc.
+
+    Event_Time =
+      (
+        year(Date) - 2022
+      ) * 12 +
+      (
+        month(Date) - 10
+      )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 16. Final validation
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("FINAL PANEL\n")
+cat("========================================\n")
+
+cat(
+  "Rows:",
+  nrow(panel_clean),
+  "\n"
+)
+
+cat(
+  "Counties:",
+  n_distinct(panel_clean$County_ID),
+  "\n"
+)
+
+cat(
+  "Months:",
+  n_distinct(panel_clean$Date),
+  "\n"
+)
+
+cat(
+  "Treated counties:",
+  n_distinct(
+    panel_clean$County_ID[
+      panel_clean$Treatment == 1
+    ]
+  ),
+  "\n"
+)
+
+cat(
+  "Missing log_ZHVI:",
+  sum(is.na(panel_clean$log_ZHVI)),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 17. Save clean panel
+# ------------------------------------------------------------------------------
+
+saveRDS(
+  panel_clean,
+  output_file
+)
+
+
+cat(
+  "\nSaved cleaned panel to:",
+  output_file,
+  "\n"
+)
+
+cat(
+  "\n01_build_panel.R completed successfully.\n"
+)
