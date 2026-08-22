@@ -1,1 +1,558 @@
+# ==============================================================================
+# figures_tables.R
+#
+# Inputs:
+#   results/model_performance.csv
+#   results/random_forest_feature_importance.csv
+#   data/ian_case_study.rds
+#
+# Outputs:
+#   figures/01_model_performance.png
+#   figures/02_feature_importance.png
+#   figures/03_florida_actual_vs_predicted.png
+#   figures/04_damage_unexpected_resilience.png
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+
+
+# ------------------------------------------------------------------------------
+# 1. Confirm required files exist
+# ------------------------------------------------------------------------------
+
+required_files <- c(
+  "results/model_performance.csv",
+  "results/random_forest_feature_importance.csv",
+  "data/ian_case_study.rds"
+)
+
+missing_files <- required_files[
+  !file.exists(required_files)
+]
+
+if (length(missing_files) > 0) {
+
+  stop(
+    paste(
+      "Missing required files:",
+      paste(missing_files, collapse = ", "),
+      "\nRun scripts 01-05 first."
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 2. Create figures directory if needed
+# ------------------------------------------------------------------------------
+
+if (!dir.exists("figures")) {
+  dir.create("figures")
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. Load final analytical results
+# ------------------------------------------------------------------------------
+
+model_performance <- read_csv(
+  "results/model_performance.csv",
+  show_col_types = FALSE
+)
+
+rf_importance <- read_csv(
+  "results/random_forest_feature_importance.csv",
+  show_col_types = FALSE
+)
+
+ian_case <- readRDS(
+  "data/ian_case_study.rds"
+)
+
+
+# ==============================================================================
+# FIGURE 1: MODEL PERFORMANCE
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 4. Prepare model labels/order
+# ------------------------------------------------------------------------------
+
+model_performance_plot <- model_performance %>%
+
+  mutate(
+
+    Model = factor(
+      Model,
+      levels = c(
+        "Linear Regression",
+        "Elastic Net",
+        "Random Forest",
+        "Ensemble"
+      )
+    )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 5. Plot cross-validated R-squared
+# ------------------------------------------------------------------------------
+
+p_model_performance <- ggplot(
+
+  model_performance_plot,
+
+  aes(
+    x = Model,
+    y = CV_R2
+  )
+
+) +
+
+  geom_col(
+    width = 0.65
+  ) +
+
+  geom_text(
+    aes(
+      label = sprintf("%.3f", CV_R2)
+    ),
+    vjust = -0.5,
+    size = 4
+  ) +
+
+  scale_y_continuous(
+    limits = c(0, 0.60),
+    breaks = seq(0, 0.60, 0.10),
+    expand = expansion(
+      mult = c(0, 0.03)
+    )
+  ) +
+
+  labs(
+    title = "Out-of-Sample Prediction of Housing Resilience",
+    subtitle = "State-stratified 10-fold cross-validation across 281 counties",
+    x = NULL,
+    y = expression("Cross-validated " * R^2),
+    caption = "Higher values indicate better out-of-sample predictive performance."
+  ) +
+
+  theme_minimal(
+    base_size = 13
+  ) +
+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(
+      face = "bold",
+      size = 17
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    ),
+    axis.text.x = element_text(
+      size = 11
+    ),
+    plot.caption = element_text(
+      hjust = 0
+    )
+  )
+
+
+ggsave(
+  filename = "figures/01_model_performance.png",
+  plot = p_model_performance,
+  width = 8,
+  height = 5.5,
+  dpi = 300
+)
+
+
+# ==============================================================================
+# FIGURE 2: RANDOM FOREST FEATURE IMPORTANCE
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 6. Human-readable feature names
+# ------------------------------------------------------------------------------
+
+feature_labels <- c(
+
+  "Baseline_Log_ZHVI" =
+    "Sep. 2022 home value level",
+
+  "Pre_Return_6m" =
+    "6-month pre-Ian return",
+
+  "Pre_Return_12m" =
+    "12-month pre-Ian return",
+
+  "Pre_Return_24m" =
+    "24-month pre-Ian return",
+
+  "Pre_Volatility_12m" =
+    "12-month pre-Ian volatility",
+
+  "Log_Population" =
+    "Population",
+
+  "Log_Income" =
+    "Median household income",
+
+  "Unemployment_PreIan" =
+    "Pre-Ian unemployment",
+
+  "Population_Growth" =
+    "Population growth",
+
+  "Income_Growth" =
+    "Income growth",
+
+  "Unemployment_Change" =
+    "Change in unemployment",
+
+  "State" =
+    "State"
+)
+
+
+rf_importance_plot <- rf_importance %>%
+
+  mutate(
+
+    Feature_Label =
+      recode(
+        Feature,
+        !!!feature_labels
+      )
+
+  ) %>%
+
+  arrange(
+    Importance
+  ) %>%
+
+  mutate(
+
+    Feature_Label =
+      factor(
+        Feature_Label,
+        levels = Feature_Label
+      )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 7. Plot permutation importance
+# ------------------------------------------------------------------------------
+
+p_feature_importance <- ggplot(
+
+  rf_importance_plot,
+
+  aes(
+    x = Importance,
+    y = Feature_Label
+  )
+
+) +
+
+  geom_col(
+    width = 0.65
+  ) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  labs(
+    title = "What Predicts Housing Market Resilience?",
+    subtitle = "Random forest permutation importance using pre-Ian information",
+    x = "Permutation importance",
+    y = NULL,
+    caption = paste(
+      "Higher importance indicates greater contribution to predictive accuracy.",
+      "Negative values indicate no useful incremental predictive contribution."
+    )
+  ) +
+
+  theme_minimal(
+    base_size = 13
+  ) +
+
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(
+      face = "bold",
+      size = 17
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    ),
+    axis.text.y = element_text(
+      size = 10.5
+    ),
+    plot.caption = element_text(
+      hjust = 0
+    )
+  )
+
+
+ggsave(
+  filename = "figures/02_feature_importance.png",
+  plot = p_feature_importance,
+  width = 8.5,
+  height = 6.5,
+  dpi = 300
+)
+
+
+# ==============================================================================
+# FIGURE 3: ACTUAL VS PREDICTED RESILIENCE
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 8. Calculate shared axis limits
+# ------------------------------------------------------------------------------
+
+actual_predicted_range <- range(
+  c(
+    ian_case$Pred_Ensemble,
+    ian_case$Resilience_Z
+  ),
+  na.rm = TRUE
+)
+
+
+plot_padding <- 0.08 *
+  diff(
+    actual_predicted_range
+  )
+
+
+axis_limits <- c(
+  actual_predicted_range[1] - plot_padding,
+  actual_predicted_range[2] + plot_padding
+)
+
+
+# ------------------------------------------------------------------------------
+# 9. Actual vs predicted plot
+# ------------------------------------------------------------------------------
+
+p_actual_predicted <- ggplot(
+
+  ian_case,
+
+  aes(
+    x = Pred_Ensemble,
+    y = Resilience_Z
+  )
+
+) +
+
+  geom_abline(
+    intercept = 0,
+    slope = 1,
+    linetype = "dashed",
+    linewidth = 0.55
+  ) +
+
+  geom_point(
+    size = 3
+  ) +
+
+  geom_text_repel(
+    aes(
+      label = County
+    ),
+    size = 3.6,
+    box.padding = 0.35,
+    point.padding = 0.2,
+    min.segment.length = 0,
+    max.overlaps = Inf,
+    seed = 123
+  ) +
+
+  coord_equal(
+    xlim = axis_limits,
+    ylim = axis_limits
+  ) +
+
+  labs(
+    title = "Florida Housing Resilience: Actual vs. Predicted",
+    subtitle = paste0(
+      "Hurricane Ian-exposed counties\n",
+      "Below the 45° line = less resilient than predicted"
+    ),
+    x = "Predicted Resilience (z-score)",
+    y = "Actual Resilience (z-score)",
+    caption = "Predictions are out-of-fold and use only pre-Ian housing and economic characteristics."
+  ) +
+
+  theme_minimal(
+    base_size = 13
+  ) +
+
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(
+      face = "bold",
+      size = 17
+    ),
+    plot.subtitle = element_text(
+      size = 12,
+      lineheight = 1.2
+    ),
+    plot.caption = element_text(
+      hjust = 0
+    )
+  )
+
+
+ggsave(
+  filename = "figures/03_florida_actual_vs_predicted.png",
+  plot = p_actual_predicted,
+  width = 8,
+  height = 7,
+  dpi = 300
+)
+
+
+# ==============================================================================
+# FIGURE 4: DAMAGE VS UNEXPECTED RESILIENCE
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 10. Damage association plot
+# ------------------------------------------------------------------------------
+
+p_damage_resilience <- ggplot(
+
+  ian_case,
+
+  aes(
+    x = Log_Damage_Per_Capita,
+    y = Unexpected_Resilience
+  )
+
+) +
+
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    linewidth = 0.8
+  ) +
+
+  geom_point(
+    size = 3
+  ) +
+
+  geom_text_repel(
+
+    aes(
+      label = County
+    ),
+
+    size = 3.3,
+    box.padding = 0.35,
+    point.padding = 0.2,
+    min.segment.length = 0,
+    max.overlaps = Inf,
+    seed = 123
+  ) +
+
+  labs(
+    title = "Hurricane Ian Damage and Unexpected Housing Resilience",
+    subtitle = paste0(
+      "Negative values indicate less resilience than predicted by ",
+      "pre-Ian fundamentals"
+    ),
+    x = "Log(1 + NOAA property damage per capita)",
+    y = "Unexpected Resilience (Actual − Predicted)",
+    caption = paste0(
+      "Ian-exposed Florida counties only. ",
+      "Association is descriptive, not causal."
+    )
+  ) +
+
+  theme_minimal(
+    base_size = 13
+  ) +
+
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(
+      face = "bold",
+      size = 17
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    ),
+    plot.caption = element_text(
+      hjust = 0
+    )
+  )
+
+
+ggsave(
+  filename = "figures/04_damage_unexpected_resilience.png",
+  plot = p_damage_resilience,
+  width = 8,
+  height = 6.5,
+  dpi = 300
+)
+
+
+# ==============================================================================
+# FINAL SUMMARY
+# ==============================================================================
+
+
+cat("\n========================================\n")
+cat("FINAL FIGURES CREATED\n")
+cat("========================================\n")
+
+cat(
+  "figures/01_model_performance.png\n"
+)
+
+cat(
+  "figures/02_feature_importance.png\n"
+)
+
+cat(
+  "figures/03_florida_actual_vs_predicted.png\n"
+)
+
+cat(
+  "figures/04_damage_unexpected_resilience.png\n"
+)
+
+cat(
+  "\n06_figures_tables.R completed successfully.\n"
+)
