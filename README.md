@@ -51,6 +51,16 @@ Among the 20 Ian-exposed Florida counties, the association between NOAA property
 
 The highest-damage group also exhibited lower unexpected resilience in an exploratory Wilcoxon rank-sum comparison.
 
+## Data Structure
+
+The project uses data from:
+
+Zillow Home Value Index (ZHVI)
+NOAA/NCEI Storm Events
+County-level population data (U.S Census)
+Median household income (U.S Census)
+Unemployment rates (BLS)
+
 ## Repository Structure
 
 ```text
