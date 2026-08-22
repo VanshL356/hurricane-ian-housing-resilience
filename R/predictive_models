@@ -1,1 +1,1233 @@
+# ==============================================================================
+# predictive_models.R
+#
+# Purpose:
+#   Predict county-level post-2022 housing resilience using only information
+#   available before Hurricane Ian.
+#
+# Models:
+#   1. Linear regression
+#   2. Elastic net
+#   3. Random forest
+#   4. Equal-weight ensemble
+#
+# Validation:
+#   State-stratified 10-fold cross-validation
+#
+# Inputs:
+#   data/panel_clean.rds
+#   data/resilience_index.rds
+#
+# Outputs:
+#   data/model_data.rds
+#   data/oof_predictions.rds
+#   results/model_performance.csv
+#   results/oof_predictions.csv
+#   results/random_forest_feature_importance.csv
+#   results/elastic_net_tuning.csv
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+library(glmnet)
+library(ranger)
+
+
+# ------------------------------------------------------------------------------
+# 1. Load data
+# ------------------------------------------------------------------------------
+
+if (!file.exists("data/panel_clean.rds")) {
+  stop("Run R/01_build_panel.R first.")
+}
+
+if (!file.exists("data/resilience_index.rds")) {
+  stop("Run R/03_build_resilience_index.R first.")
+}
+
+
+panel <- readRDS(
+  "data/panel_clean.rds"
+)
+
+resilience <- readRDS(
+  "data/resilience_index.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 2. Helper functions
+# ------------------------------------------------------------------------------
+
+value_at <- function(date, x, target_date) {
+
+  idx <- which(date == target_date)
+
+  if (length(idx) == 0) {
+    return(NA_real_)
+  }
+
+  x[idx[1]]
+}
+
+
+safe_mean <- function(x) {
+
+  if (length(x) == 0 || all(is.na(x))) {
+    return(NA_real_)
+  }
+
+  mean(
+    x,
+    na.rm = TRUE
+  )
+}
+
+
+safe_sd <- function(x) {
+
+  if (sum(!is.na(x)) < 2) {
+    return(NA_real_)
+  }
+
+  sd(
+    x,
+    na.rm = TRUE
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. Construct monthly pre-Ian housing changes
+# ------------------------------------------------------------------------------
+
+panel_features <- panel %>%
+
+  arrange(
+    County_ID,
+    Date
+  ) %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  mutate(
+
+    Monthly_Log_Change =
+      log_ZHVI -
+      lag(log_ZHVI)
+
+  ) %>%
+
+  ungroup()
+
+
+# ------------------------------------------------------------------------------
+# 4. Important pre-Ian dates
+# ------------------------------------------------------------------------------
+
+baseline_date <- as.Date("2022-09-01")
+
+mar22_date <- as.Date("2022-03-01")
+sep21_date <- as.Date("2021-09-01")
+sep20_date <- as.Date("2020-09-01")
+
+pre_vol_start <- as.Date("2021-10-01")
+
+
+# ------------------------------------------------------------------------------
+# 5. Build county-level predictor features
+# ------------------------------------------------------------------------------
+
+pre_features <- panel_features %>%
+
+  group_by(
+    County_ID,
+    County,
+    State
+  ) %>%
+
+  summarise(
+
+    # --------------------------------------------------------------------------
+    # Housing market levels
+    # --------------------------------------------------------------------------
+
+    Baseline_Log_ZHVI =
+      value_at(
+        Date,
+        log_ZHVI,
+        baseline_date
+      ),
+
+    Log_Mar22 =
+      value_at(
+        Date,
+        log_ZHVI,
+        mar22_date
+      ),
+
+    Log_Sep21 =
+      value_at(
+        Date,
+        log_ZHVI,
+        sep21_date
+      ),
+
+    Log_Sep20 =
+      value_at(
+        Date,
+        log_ZHVI,
+        sep20_date
+      ),
+
+
+    # --------------------------------------------------------------------------
+    # Population
+    # --------------------------------------------------------------------------
+
+    Population_2022 =
+      safe_mean(
+        Population[
+          Year == 2022 &
+          Date <= baseline_date
+        ]
+      ),
+
+    Population_2019 =
+      safe_mean(
+        Population[
+          Year == 2019
+        ]
+      ),
+
+
+    # --------------------------------------------------------------------------
+    # Household income
+    # --------------------------------------------------------------------------
+
+    Income_2022 =
+      safe_mean(
+        `Median Household Income`[
+          Year == 2022 &
+          Date <= baseline_date
+        ]
+      ),
+
+    Income_2019 =
+      safe_mean(
+        `Median Household Income`[
+          Year == 2019
+        ]
+      ),
+
+
+    # --------------------------------------------------------------------------
+    # Labor market
+    # --------------------------------------------------------------------------
+
+    Unemployment_PreIan =
+      safe_mean(
+        `Unemployment Rate`[
+          Date >= as.Date("2022-01-01") &
+          Date <= baseline_date
+        ]
+      ),
+
+    Unemployment_2021 =
+      safe_mean(
+        `Unemployment Rate`[
+          Year == 2021
+        ]
+      ),
+
+
+    # --------------------------------------------------------------------------
+    # Housing volatility during the 12 months immediately before Ian
+    # --------------------------------------------------------------------------
+
+    Pre_Volatility_12m =
+      safe_sd(
+        Monthly_Log_Change[
+          Date >= pre_vol_start &
+          Date <= baseline_date
+        ]
+      ),
+
+    .groups = "drop"
+  ) %>%
+
+  mutate(
+
+    # --------------------------------------------------------------------------
+    # Pre-Ian housing appreciation
+    # --------------------------------------------------------------------------
+
+    Pre_Return_6m =
+      100 * (
+        exp(
+          Baseline_Log_ZHVI -
+          Log_Mar22
+        ) - 1
+      ),
+
+    Pre_Return_12m =
+      100 * (
+        exp(
+          Baseline_Log_ZHVI -
+          Log_Sep21
+        ) - 1
+      ),
+
+    Pre_Return_24m =
+      100 * (
+        exp(
+          Baseline_Log_ZHVI -
+          Log_Sep20
+        ) - 1
+      ),
+
+
+    # --------------------------------------------------------------------------
+    # Socioeconomic changes
+    # --------------------------------------------------------------------------
+
+    Population_Growth =
+      100 * (
+        Population_2022 /
+        Population_2019 -
+        1
+      ),
+
+    Income_Growth =
+      100 * (
+        Income_2022 /
+        Income_2019 -
+        1
+      ),
+
+    Unemployment_Change =
+      Unemployment_PreIan -
+      Unemployment_2021
+  )
+
+
+# ------------------------------------------------------------------------------
+# 6. Combine predictors with resilience outcome
+# ------------------------------------------------------------------------------
+
+model_data <- resilience %>%
+
+  select(
+    County_ID,
+    Resilience_Z,
+    Resilience_Score
+  ) %>%
+
+  inner_join(
+    pre_features,
+    by = "County_ID"
+  ) %>%
+
+  mutate(
+
+    State =
+      factor(State),
+
+    Log_Population =
+      log1p(Population_2022),
+
+    Log_Income =
+      log1p(Income_2022)
+  )
+
+
+# ------------------------------------------------------------------------------
+# 7. Restrict to complete modeling sample
+# ------------------------------------------------------------------------------
+
+model_variables <- c(
+  "Resilience_Z",
+  "Baseline_Log_ZHVI",
+  "Pre_Return_6m",
+  "Pre_Return_12m",
+  "Pre_Return_24m",
+  "Pre_Volatility_12m",
+  "Log_Population",
+  "Log_Income",
+  "Unemployment_PreIan",
+  "Population_Growth",
+  "Income_Growth",
+  "Unemployment_Change"
+)
+
+
+model_data <- model_data %>%
+
+  filter(
+
+    if_all(
+      all_of(model_variables),
+      ~ is.finite(.x)
+    )
+
+  ) %>%
+
+  arrange(
+    State,
+    County_ID
+  )
+
+
+cat("\n========================================\n")
+cat("MODELING SAMPLE\n")
+cat("========================================\n")
+
+cat(
+  "Counties:",
+  nrow(model_data),
+  "\n\n"
+)
+
+print(
+  model_data %>%
+    count(State)
+)
+
+
+# ------------------------------------------------------------------------------
+# 8. Prediction formula
+# ------------------------------------------------------------------------------
+
+prediction_formula <- as.formula(
+
+  Resilience_Z ~
+
+    Baseline_Log_ZHVI +
+
+    Pre_Return_6m +
+
+    Pre_Return_12m +
+
+    Pre_Return_24m +
+
+    Pre_Volatility_12m +
+
+    Log_Population +
+
+    Log_Income +
+
+    Unemployment_PreIan +
+
+    Population_Growth +
+
+    Income_Growth +
+
+    Unemployment_Change +
+
+    State
+)
+
+
+# ------------------------------------------------------------------------------
+# 9. Construct state-stratified 10-fold cross-validation
+# ------------------------------------------------------------------------------
+
+set.seed(123)
+
+
+model_data <- model_data %>%
+
+  group_by(
+    State
+  ) %>%
+
+  mutate(
+
+    Fold =
+      sample(
+        rep(
+          1:10,
+          length.out = n()
+        )
+      )
+
+  ) %>%
+
+  ungroup()
+
+
+cat("\n========================================\n")
+cat("CROSS-VALIDATION FOLDS\n")
+cat("========================================\n")
+
+print(
+  model_data %>%
+    count(
+      State,
+      Fold
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 10. Containers for out-of-fold predictions
+# ------------------------------------------------------------------------------
+
+lm_predictions <- list()
+enet_predictions <- list()
+rf_predictions <- list()
+
+enet_tuning <- list()
+
+
+# ------------------------------------------------------------------------------
+# 11. Design matrix for elastic net
+# ------------------------------------------------------------------------------
+
+# Creating the matrix once ensures train/test folds always have identical
+# dummy-variable columns.
+
+x_all <- model.matrix(
+  prediction_formula,
+  data = model_data
+)[, -1, drop = FALSE]
+
+
+y_all <- model_data$Resilience_Z
+
+
+# ------------------------------------------------------------------------------
+# 12. Outer 10-fold cross-validation
+# ------------------------------------------------------------------------------
+
+alpha_grid <- c(
+  0,
+  0.25,
+  0.50,
+  0.75,
+  1
+)
+
+
+for (fold in 1:10) {
+
+  cat(
+    "\nRunning outer fold",
+    fold,
+    "of 10...\n"
+  )
+
+
+  train_idx <- which(
+    model_data$Fold != fold
+  )
+
+  test_idx <- which(
+    model_data$Fold == fold
+  )
+
+
+  train_data <- model_data[
+    train_idx,
+  ]
+
+  test_data <- model_data[
+    test_idx,
+  ]
+
+
+  # ============================================================================
+  # A. Linear regression
+  # ============================================================================
+
+  lm_fit <- lm(
+    prediction_formula,
+    data = train_data
+  )
+
+
+  pred_lm <- predict(
+    lm_fit,
+    newdata = test_data
+  )
+
+
+  lm_predictions[[fold]] <- data.frame(
+
+    County_ID =
+      test_data$County_ID,
+
+    Fold =
+      fold,
+
+    Actual =
+      test_data$Resilience_Z,
+
+    Predicted =
+      as.numeric(pred_lm)
+  )
+
+
+  # ============================================================================
+  # B. Elastic net
+  #
+  # Inner 5-fold CV selects alpha and lambda using training observations only.
+  # ============================================================================
+
+  x_train <- x_all[
+    train_idx,
+    ,
+    drop = FALSE
+  ]
+
+  x_test <- x_all[
+    test_idx,
+    ,
+    drop = FALSE
+  ]
+
+  y_train <- y_all[
+    train_idx
+  ]
+
+
+  # Same inner folds are used for each alpha value.
+  set.seed(
+    1000 + fold
+  )
+
+
+  inner_foldid <- sample(
+    rep(
+      1:5,
+      length.out = length(y_train)
+    )
+  )
+
+
+  best_mse <- Inf
+  best_alpha <- NA_real_
+  best_lambda <- NA_real_
+
+
+  for (alpha_value in alpha_grid) {
+
+    cv_fit <- cv.glmnet(
+
+      x = x_train,
+
+      y = y_train,
+
+      alpha = alpha_value,
+
+      foldid = inner_foldid,
+
+      type.measure = "mse",
+
+      standardize = TRUE
+    )
+
+
+    best_index <- which.min(
+      cv_fit$cvm
+    )
+
+
+    alpha_mse <- cv_fit$cvm[
+      best_index
+    ]
+
+
+    alpha_lambda <- cv_fit$lambda[
+      best_index
+    ]
+
+
+    enet_tuning[[
+      length(enet_tuning) + 1
+    ]] <- data.frame(
+
+      Outer_Fold =
+        fold,
+
+      Alpha =
+        alpha_value,
+
+      Lambda =
+        alpha_lambda,
+
+      Inner_CV_MSE =
+        alpha_mse
+    )
+
+
+    if (alpha_mse < best_mse) {
+
+      best_mse <- alpha_mse
+
+      best_alpha <- alpha_value
+
+      best_lambda <- alpha_lambda
+    }
+  }
+
+
+  enet_fit <- glmnet(
+
+    x = x_train,
+
+    y = y_train,
+
+    alpha = best_alpha,
+
+    lambda = best_lambda,
+
+    standardize = TRUE
+  )
+
+
+  pred_enet <- predict(
+
+    enet_fit,
+
+    newx = x_test,
+
+    s = best_lambda
+  )
+
+
+  enet_predictions[[fold]] <- data.frame(
+
+    County_ID =
+      test_data$County_ID,
+
+    Fold =
+      fold,
+
+    Actual =
+      test_data$Resilience_Z,
+
+    Predicted =
+      as.numeric(pred_enet)
+  )
+
+
+  # ============================================================================
+  # C. Random forest
+  # ============================================================================
+
+  rf_fit <- ranger(
+
+    formula =
+      prediction_formula,
+
+    data =
+      train_data,
+
+    num.trees =
+      1000,
+
+    mtry =
+      4,
+
+    min.node.size =
+      5,
+
+    seed =
+      2000 + fold
+  )
+
+
+  pred_rf <- predict(
+
+    rf_fit,
+
+    data =
+      test_data
+  )$predictions
+
+
+  rf_predictions[[fold]] <- data.frame(
+
+    County_ID =
+      test_data$County_ID,
+
+    Fold =
+      fold,
+
+    Actual =
+      test_data$Resilience_Z,
+
+    Predicted =
+      as.numeric(pred_rf)
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 13. Combine out-of-fold predictions
+# ------------------------------------------------------------------------------
+
+lm_cv_results <- bind_rows(
+  lm_predictions
+)
+
+enet_cv_results <- bind_rows(
+  enet_predictions
+)
+
+rf_cv_results <- bind_rows(
+  rf_predictions
+)
+
+
+enet_tuning_results <- bind_rows(
+  enet_tuning
+)
+
+
+# ------------------------------------------------------------------------------
+# 14. Construct equal-weight ensemble
+# ------------------------------------------------------------------------------
+
+oof_predictions <- lm_cv_results %>%
+
+  rename(
+    Pred_LM = Predicted
+  ) %>%
+
+  left_join(
+
+    enet_cv_results %>%
+
+      select(
+        County_ID,
+        Fold,
+        Pred_ENet = Predicted
+      ),
+
+    by = c(
+      "County_ID",
+      "Fold"
+    )
+  ) %>%
+
+  left_join(
+
+    rf_cv_results %>%
+
+      select(
+        County_ID,
+        Fold,
+        Pred_RF = Predicted
+      ),
+
+    by = c(
+      "County_ID",
+      "Fold"
+    )
+  ) %>%
+
+  mutate(
+
+    Pred_Ensemble =
+      (
+        Pred_LM +
+        Pred_ENet +
+        Pred_RF
+      ) / 3,
+
+    # Positive = county was more resilient than predicted.
+    #
+    # Negative = county was less resilient than predicted.
+    Unexpected_Resilience =
+      Actual -
+      Pred_Ensemble
+  )
+
+
+# ------------------------------------------------------------------------------
+# 15. Performance metrics
+# ------------------------------------------------------------------------------
+
+calculate_metrics <- function(actual, predicted) {
+
+  data.frame(
+
+    RMSE =
+      sqrt(
+        mean(
+          (actual - predicted)^2
+        )
+      ),
+
+    MAE =
+      mean(
+        abs(
+          actual - predicted
+        )
+      ),
+
+    CV_R2 =
+      1 -
+      sum(
+        (actual - predicted)^2
+      ) /
+      sum(
+        (
+          actual -
+          mean(actual)
+        )^2
+      )
+  )
+}
+
+
+performance <- bind_rows(
+
+  calculate_metrics(
+    oof_predictions$Actual,
+    oof_predictions$Pred_LM
+  ) %>%
+    mutate(
+      Model = "Linear Regression"
+    ),
+
+  calculate_metrics(
+    oof_predictions$Actual,
+    oof_predictions$Pred_ENet
+  ) %>%
+    mutate(
+      Model = "Elastic Net"
+    ),
+
+  calculate_metrics(
+    oof_predictions$Actual,
+    oof_predictions$Pred_RF
+  ) %>%
+    mutate(
+      Model = "Random Forest"
+    ),
+
+  calculate_metrics(
+    oof_predictions$Actual,
+    oof_predictions$Pred_Ensemble
+  ) %>%
+    mutate(
+      Model = "Ensemble"
+    )
+) %>%
+
+  select(
+    Model,
+    RMSE,
+    MAE,
+    CV_R2
+  ) %>%
+
+  arrange(
+    RMSE
+  )
+
+
+cat("\n========================================\n")
+cat("OUT-OF-FOLD MODEL PERFORMANCE\n")
+cat("========================================\n")
+
+print(
+  performance
+)
+
+
+# ------------------------------------------------------------------------------
+# 16. Fit final random forest on all counties for feature importance
+# ------------------------------------------------------------------------------
+
+set.seed(123)
+
+
+final_rf <- ranger(
+
+  formula =
+    prediction_formula,
+
+  data =
+    model_data,
+
+  num.trees =
+    2000,
+
+  mtry =
+    4,
+
+  min.node.size =
+    5,
+
+  importance =
+    "permutation",
+
+  seed =
+    123
+)
+
+
+rf_importance <- data.frame(
+
+  Feature =
+    names(
+      final_rf$variable.importance
+    ),
+
+  Importance =
+    as.numeric(
+      final_rf$variable.importance
+    )
+) %>%
+
+  arrange(
+    desc(Importance)
+  )
+
+
+cat("\n========================================\n")
+cat("RANDOM FOREST FEATURE IMPORTANCE\n")
+cat("========================================\n")
+
+print(
+  rf_importance
+)
+
+
+# ------------------------------------------------------------------------------
+# 17. Add county/state information to OOF results
+# ------------------------------------------------------------------------------
+
+oof_predictions <- oof_predictions %>%
+
+  left_join(
+
+    model_data %>%
+
+      select(
+        County_ID,
+        County,
+        State,
+        Resilience_Score
+      ),
+
+    by = "County_ID"
+  ) %>%
+
+  select(
+
+    County_ID,
+    County,
+    State,
+    Fold,
+
+    Actual,
+    Resilience_Score,
+
+    Pred_LM,
+    Pred_ENet,
+    Pred_RF,
+    Pred_Ensemble,
+
+    Unexpected_Resilience
+  )
+
+
+# ------------------------------------------------------------------------------
+# 18. Unexpected resilience leaderboard
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("LARGEST POSITIVE PREDICTION ERRORS\n")
+cat("========================================\n")
+
+print(
+
+  oof_predictions %>%
+
+    arrange(
+      desc(Unexpected_Resilience)
+    ) %>%
+
+    select(
+      County_ID,
+      Actual,
+      Pred_Ensemble,
+      Unexpected_Resilience
+    ) %>%
+
+    slice_head(
+      n = 10
+    )
+)
+
+
+cat("\n========================================\n")
+cat("LARGEST NEGATIVE PREDICTION ERRORS\n")
+cat("========================================\n")
+
+print(
+
+  oof_predictions %>%
+
+    arrange(
+      Unexpected_Resilience
+    ) %>%
+
+    select(
+      County_ID,
+      Actual,
+      Pred_Ensemble,
+      Unexpected_Resilience
+    ) %>%
+
+    slice_head(
+      n = 10
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 19. Save local analytical objects
+# ------------------------------------------------------------------------------
+
+saveRDS(
+  model_data,
+  "data/model_data.rds"
+)
+
+
+saveRDS(
+  oof_predictions,
+  "data/oof_predictions.rds"
+)
+
+
+saveRDS(
+  final_rf,
+  "data/final_random_forest.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 20. Save public results
+# ------------------------------------------------------------------------------
+
+write_csv(
+  performance,
+  "results/model_performance.csv"
+)
+
+
+write_csv(
+  oof_predictions,
+  "results/oof_predictions.csv"
+)
+
+
+write_csv(
+  rf_importance,
+  "results/random_forest_feature_importance.csv"
+)
+
+
+write_csv(
+  enet_tuning_results,
+  "results/elastic_net_tuning.csv"
+)
+
+
+# ------------------------------------------------------------------------------
+# 21. Final checks
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("FINAL CHECKS\n")
+cat("========================================\n")
+
+cat(
+  "Modeling counties:",
+  nrow(model_data),
+  "\n"
+)
+
+cat(
+  "OOF predictions:",
+  nrow(oof_predictions),
+  "\n"
+)
+
+cat(
+  "Unique OOF counties:",
+  n_distinct(oof_predictions$County_ID),
+  "\n"
+)
+
+
+if (
+  nrow(oof_predictions) !=
+  nrow(model_data)
+) {
+
+  warning(
+    "OOF prediction count does not equal modeling sample size."
+  )
+}
+
+
+if (
+  anyDuplicated(
+    oof_predictions$County_ID
+  ) > 0
+) {
+
+  warning(
+    "Duplicate County_ID values found in OOF predictions."
+  )
+}
+
+
+cat("\nSaved:\n")
+
+cat(
+  "  data/model_data.rds\n"
+)
+
+cat(
+  "  data/oof_predictions.rds\n"
+)
+
+cat(
+  "  data/final_random_forest.rds\n"
+)
+
+cat(
+  "  results/model_performance.csv\n"
+)
+
+cat(
+  "  results/oof_predictions.csv\n"
+)
+
+cat(
+  "  results/random_forest_feature_importance.csv\n"
+)
+
+cat(
+  "  results/elastic_net_tuning.csv\n"
+)
+
+cat(
+  "\n04_predictive_models.R completed successfully.\n"
+)
