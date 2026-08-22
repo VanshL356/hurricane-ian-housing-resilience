@@ -1,7 +1,14 @@
 # ==============================================================================
 # ian_case_study.R
 #
+# Benchmark:
+#   Georgia + non-Ian Florida counties
+#
+# Important:
+#   This analysis is predictive/descriptive, not causal.
+#
 # Inputs:
+#   data/model_data.rds
 #   data/resilience_index.rds
 #   data/oof_predictions.rds
 #   data/ian_damage_per_capita.rds
@@ -10,8 +17,12 @@
 #   data/ian_case_study.rds
 #   results/ian_case_study.csv
 #   results/ian_damage_association.csv
+#   results/ian_severe_group_summary.csv
 #   results/ian_severe_group_comparison.csv
 #   results/ian_leave_one_out.csv
+#   results/ian_benchmark_robustness.csv
+#   results/ian_benchmark_prediction_comparison.csv
+#   results/ian_elastic_net_tuning.csv
 # ==============================================================================
 
 
@@ -21,23 +32,24 @@
 
 library(dplyr)
 library(readr)
+library(glmnet)
+library(ranger)
 
 
 # ------------------------------------------------------------------------------
-# 1. Load inputs
+# 1. Load data
 # ------------------------------------------------------------------------------
 
 required_files <- c(
+  "data/model_data.rds",
   "data/resilience_index.rds",
   "data/oof_predictions.rds",
   "data/ian_damage_per_capita.rds"
 )
 
-
 missing_files <- required_files[
   !file.exists(required_files)
 ]
-
 
 if (length(missing_files) > 0) {
 
@@ -50,6 +62,10 @@ if (length(missing_files) > 0) {
   )
 }
 
+
+model_data <- readRDS(
+  "data/model_data.rds"
+)
 
 resilience <- readRDS(
   "data/resilience_index.rds"
@@ -65,33 +81,487 @@ ian_damage <- readRDS(
 
 
 # ------------------------------------------------------------------------------
-# 2. Construct Florida-specific resilience percentile
+# 2. Identify Ian counties
 # ------------------------------------------------------------------------------
 
-florida_resilience <- resilience %>%
+ian_ids <- unique(
+  ian_damage$County_ID
+)
+
+cat("\n========================================\n")
+cat("IAN COUNTY IDENTIFICATION\n")
+cat("========================================\n")
+
+cat(
+  "Ian counties:",
+  length(ian_ids),
+  "\n"
+)
+
+
+if (length(ian_ids) != 20) {
+
+  warning(
+    paste(
+      "Expected 20 Ian counties but found",
+      length(ian_ids)
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. Prediction formula
+# ------------------------------------------------------------------------------
+
+prediction_formula <- as.formula(
+
+  Resilience_Z ~
+
+    Baseline_Log_ZHVI +
+
+    Pre_Return_6m +
+
+    Pre_Return_12m +
+
+    Pre_Return_24m +
+
+    Pre_Volatility_12m +
+
+    Log_Population +
+
+    Log_Income +
+
+    Unemployment_PreIan +
+
+    Population_Growth +
+
+    Income_Growth +
+
+    Unemployment_Change +
+
+    State
+)
+
+
+# ------------------------------------------------------------------------------
+# 4. Create Ian holdout sample
+# ------------------------------------------------------------------------------
+
+ian_holdout <- model_data %>%
 
   filter(
-    State == "FL"
-  ) %>%
-
-  mutate(
-
-    Florida_Resilience_Percentile =
-      100 *
-      percent_rank(
-        Resilience_Z
-      )
-  ) %>%
-
-  select(
-    County_ID,
-    Florida_Resilience_Percentile
+    County_ID %in% ian_ids
   )
 
 
+cat(
+  "Ian counties available in modeling sample:",
+  nrow(ian_holdout),
+  "\n"
+)
+
+
+if (nrow(ian_holdout) != 20) {
+
+  stop(
+    paste(
+      "Expected all 20 Ian counties in model_data but found",
+      nrow(ian_holdout)
+    )
+  )
+}
+
+
 # ------------------------------------------------------------------------------
-# 3. Merge Ian exposure, actual resilience, and OOF predictions
+# 5. Primary training sample:
+#    Georgia + Florida counties outside the designated Ian group
 # ------------------------------------------------------------------------------
+
+ga_fl_train <- model_data %>%
+
+  filter(
+    State %in% c("GA", "FL"),
+    !County_ID %in% ian_ids
+  )
+
+
+cat("\n========================================\n")
+cat("PRIMARY BENCHMARK TRAINING SAMPLE\n")
+cat("========================================\n")
+
+cat(
+  "Training counties:",
+  nrow(ga_fl_train),
+  "\n"
+)
+
+print(
+  ga_fl_train %>%
+    count(State)
+)
+
+
+# Expected approximately:
+#
+# FL = 43
+# GA = 155
+# Total = 198
+
+
+
+# ==============================================================================
+# 7. HELPER FUNCTION: FIT HOLDOUT ENSEMBLE
+# ==============================================================================
+
+fit_holdout_ensemble <- function(
+    train_data,
+    test_data,
+    state_levels,
+    seed = 123) {
+
+
+  # --------------------------------------------------------------------------
+  # Ensure train/test factors use identical levels
+  # --------------------------------------------------------------------------
+
+  train_data <- train_data %>%
+
+    mutate(
+      State = factor(
+        as.character(State),
+        levels = state_levels
+      )
+    )
+
+
+  test_data <- test_data %>%
+
+    mutate(
+      State = factor(
+        as.character(State),
+        levels = state_levels
+      )
+    )
+
+
+  # ==========================================================================
+  # A. Linear regression
+  # ==========================================================================
+
+  lm_fit <- lm(
+    prediction_formula,
+    data = train_data
+  )
+
+
+  pred_lm <- predict(
+    lm_fit,
+    newdata = test_data
+  )
+
+
+  # ==========================================================================
+  # B. Elastic net
+  # ==========================================================================
+
+  x_train <- model.matrix(
+    prediction_formula,
+    data = train_data
+  )[, -1, drop = FALSE]
+
+
+  x_test <- model.matrix(
+    prediction_formula,
+    data = test_data
+  )[, -1, drop = FALSE]
+
+
+  if (
+    !identical(
+      colnames(x_train),
+      colnames(x_test)
+    )
+  ) {
+
+    stop(
+      "Elastic-net train and test matrices have different columns."
+    )
+  }
+
+
+  y_train <- train_data$Resilience_Z
+
+
+  alpha_grid <- c(
+    0,
+    0.25,
+    0.50,
+    0.75,
+    1
+  )
+
+
+  # --------------------------------------------------------------------------
+  # Stratified inner CV folds
+  # --------------------------------------------------------------------------
+
+  set.seed(seed)
+
+  inner_foldid <- rep(
+    NA_integer_,
+    nrow(train_data)
+  )
+
+
+  for (state_value in state_levels) {
+
+    state_index <- which(
+      train_data$State == state_value
+    )
+
+    inner_foldid[state_index] <- sample(
+      rep(
+        1:5,
+        length.out = length(state_index)
+      )
+    )
+  }
+
+
+  tuning_results <- list()
+
+
+  for (alpha_value in alpha_grid) {
+
+    cv_fit <- cv.glmnet(
+
+      x = x_train,
+
+      y = y_train,
+
+      alpha = alpha_value,
+
+      foldid = inner_foldid,
+
+      type.measure = "mse",
+
+      standardize = TRUE
+    )
+
+
+    best_index <- which.min(
+      cv_fit$cvm
+    )
+
+
+    tuning_results[[
+      length(tuning_results) + 1
+    ]] <- data.frame(
+
+      Alpha =
+        alpha_value,
+
+      Lambda =
+        cv_fit$lambda[
+          best_index
+        ],
+
+      CV_MSE =
+        cv_fit$cvm[
+          best_index
+        ]
+    )
+  }
+
+
+  tuning_results <- bind_rows(
+    tuning_results
+  )
+
+
+  best_tuning <- tuning_results %>%
+
+    arrange(
+      CV_MSE
+    ) %>%
+
+    slice(1)
+
+
+  enet_fit <- glmnet(
+
+    x = x_train,
+
+    y = y_train,
+
+    alpha =
+      best_tuning$Alpha,
+
+    lambda =
+      best_tuning$Lambda,
+
+    standardize = TRUE
+  )
+
+
+  pred_enet <- as.numeric(
+
+    predict(
+
+      enet_fit,
+
+      newx = x_test,
+
+      s = best_tuning$Lambda
+    )
+  )
+
+
+  # ==========================================================================
+  # C. Random forest
+  # ==========================================================================
+
+  rf_fit <- ranger(
+
+    formula =
+      prediction_formula,
+
+    data =
+      train_data,
+
+    num.trees =
+      2000,
+
+    mtry =
+      4,
+
+    min.node.size =
+      5,
+
+    seed =
+      seed
+  )
+
+
+  pred_rf <- predict(
+
+    rf_fit,
+
+    data =
+      test_data
+  )$predictions
+
+
+  # ==========================================================================
+  # D. Ensemble
+  # ==========================================================================
+
+  predictions <- data.frame(
+
+    County_ID =
+      test_data$County_ID,
+
+    Actual =
+      test_data$Resilience_Z,
+
+    Pred_LM =
+      as.numeric(pred_lm),
+
+    Pred_ENet =
+      pred_enet,
+
+    Pred_RF =
+      as.numeric(pred_rf)
+  ) %>%
+
+    mutate(
+
+      Pred_Ensemble =
+        (
+          Pred_LM +
+          Pred_ENet +
+          Pred_RF
+        ) / 3,
+
+      Unexpected_Resilience =
+        Actual -
+        Pred_Ensemble
+    )
+
+
+  return(
+
+    list(
+
+      predictions =
+        predictions,
+
+      tuning =
+        tuning_results,
+
+      best_tuning =
+        best_tuning,
+
+      lm_fit =
+        lm_fit,
+
+      enet_fit =
+        enet_fit,
+
+      rf_fit =
+        rf_fit
+    )
+  )
+}
+
+
+# ==============================================================================
+# 8. PRIMARY MODEL: GA + NON-IAN FL
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("FITTING PRIMARY GA + FL BENCHMARK\n")
+cat("========================================\n")
+
+
+primary_fit <- fit_holdout_ensemble(
+
+  train_data =
+    ga_fl_train,
+
+  test_data =
+    ian_holdout,
+
+  state_levels =
+    c("FL", "GA"),
+
+  seed =
+    123
+)
+
+
+primary_predictions <- primary_fit$predictions
+
+
+cat("\nPrimary elastic-net tuning:\n")
+
+print(
+  primary_fit$tuning
+)
+
+
+cat("\nSelected elastic-net parameters:\n")
+
+print(
+  primary_fit$best_tuning
+)
+
+
+
+# ==============================================================================
+# 10. BUILD PRIMARY IAN CASE-STUDY DATASET
+# ==============================================================================
 
 ian_case <- ian_damage %>%
 
@@ -125,13 +595,8 @@ ian_case <- ian_damage %>%
   ) %>%
 
   left_join(
-    florida_resilience,
-    by = "County_ID"
-  ) %>%
 
-  left_join(
-
-    oof_predictions %>%
+    primary_predictions %>%
 
       select(
         County_ID,
@@ -143,47 +608,62 @@ ian_case <- ian_damage %>%
       ),
 
     by = "County_ID"
-  ) %>%
-
-  arrange(
-    desc(Damage_Per_Capita)
   )
 
 
 # ------------------------------------------------------------------------------
-# 4. Validate Ian sample
+# 11. Florida-specific percentile
+# ------------------------------------------------------------------------------
+
+florida_percentiles <- resilience %>%
+
+  filter(
+    State == "FL"
+  ) %>%
+
+  mutate(
+
+    Florida_Resilience_Percentile =
+      100 *
+      percent_rank(
+        Resilience_Z
+      )
+  ) %>%
+
+  select(
+    County_ID,
+    Florida_Resilience_Percentile
+  )
+
+
+ian_case <- ian_case %>%
+
+  left_join(
+    florida_percentiles,
+    by = "County_ID"
+  ) %>%
+
+  arrange(
+    Unexpected_Resilience
+  )
+
+
+# ------------------------------------------------------------------------------
+# 12. Validation
 # ------------------------------------------------------------------------------
 
 cat("\n========================================\n")
-cat("IAN CASE-STUDY SAMPLE\n")
+cat("PRIMARY IAN CASE STUDY\n")
 cat("========================================\n")
 
 cat(
-  "Ian-exposed counties:",
+  "Ian counties:",
   nrow(ian_case),
   "\n"
 )
 
 cat(
-  "Counties with positive NOAA property damage:",
-  sum(
-    ian_case$Damage_Per_Capita > 0,
-    na.rm = TRUE
-  ),
-  "\n"
-)
-
-cat(
-  "Counties with zero reported NOAA property damage:",
-  sum(
-    ian_case$Damage_Per_Capita == 0,
-    na.rm = TRUE
-  ),
-  "\n"
-)
-
-cat(
-  "Missing ensemble predictions:",
+  "Missing benchmark predictions:",
   sum(
     is.na(
       ian_case$Pred_Ensemble
@@ -192,39 +672,6 @@ cat(
   "\n"
 )
 
-
-if (nrow(ian_case) != 20) {
-
-  warning(
-    paste(
-      "Expected 20 Ian counties but found",
-      nrow(ian_case)
-    )
-  )
-}
-
-
-if (
-  any(
-    is.na(
-      ian_case$Pred_Ensemble
-    )
-  )
-) {
-
-  warning(
-    "At least one Ian county is missing an out-of-fold prediction."
-  )
-}
-
-
-# ------------------------------------------------------------------------------
-# 5. Display core Ian results
-# ------------------------------------------------------------------------------
-
-cat("\n========================================\n")
-cat("IAN COUNTY RESULTS\n")
-cat("========================================\n")
 
 print(
 
@@ -233,78 +680,22 @@ print(
     select(
       County,
       Damage_Per_Capita,
-      Return_24m,
       Resilience_Z,
       Pred_Ensemble,
-      Unexpected_Resilience,
-      Florida_Resilience_Percentile
+      Unexpected_Resilience
     ),
 
   n = Inf
 )
 
 
-# ------------------------------------------------------------------------------
-# 6. Rank counties by unexpected resilience
-# ------------------------------------------------------------------------------
-
-cat("\n========================================\n")
-cat("MOST RESILIENT RELATIVE TO PREDICTION\n")
-cat("========================================\n")
-
-print(
-
-  ian_case %>%
-
-    arrange(
-      desc(
-        Unexpected_Resilience
-      )
-    ) %>%
-
-    select(
-      County,
-      Pred_Ensemble,
-      Resilience_Z,
-      Unexpected_Resilience,
-      Damage_Per_Capita
-    ) %>%
-
-    slice_head(
-      n = 10
-    )
-)
-
-
-cat("\n========================================\n")
-cat("LEAST RESILIENT RELATIVE TO PREDICTION\n")
-cat("========================================\n")
-
-print(
-
-  ian_case %>%
-
-    arrange(
-      Unexpected_Resilience
-    ) %>%
-
-    select(
-      County,
-      Pred_Ensemble,
-      Resilience_Z,
-      Unexpected_Resilience,
-      Damage_Per_Capita
-    ) %>%
-
-    slice_head(
-      n = 10
-    )
-)
+# ==============================================================================
+# 13. CONTINUOUS DAMAGE ASSOCIATION
+# ==============================================================================
 
 
 # ------------------------------------------------------------------------------
-# 7. Spearman association:
-#    damage intensity vs unexpected resilience
+# Spearman
 # ------------------------------------------------------------------------------
 
 spearman_test <- cor.test(
@@ -320,7 +711,7 @@ spearman_test <- cor.test(
 
 
 # ------------------------------------------------------------------------------
-# 8. Pearson association
+# Pearson
 # ------------------------------------------------------------------------------
 
 pearson_test <- cor.test(
@@ -334,7 +725,7 @@ pearson_test <- cor.test(
 
 
 # ------------------------------------------------------------------------------
-# 9. Simple linear regression
+# OLS
 # ------------------------------------------------------------------------------
 
 damage_lm <- lm(
@@ -355,10 +746,6 @@ damage_coef <- coef(
   damage_lm_summary
 )
 
-
-# ------------------------------------------------------------------------------
-# 10. Save continuous-damage association results
-# ------------------------------------------------------------------------------
 
 damage_association <- data.frame(
 
@@ -417,7 +804,7 @@ damage_association <- data.frame(
 
 
 cat("\n========================================\n")
-cat("DAMAGE VS UNEXPECTED RESILIENCE\n")
+cat("DAMAGE ASSOCIATION\n")
 cat("========================================\n")
 
 print(
@@ -425,20 +812,15 @@ print(
 )
 
 
-# ------------------------------------------------------------------------------
-# 11. Exploratory severe-damage grouping
-# ------------------------------------------------------------------------------
-
-# Descriptive threshold:
-#
-# Severe damage = at least $2,000 of reported NOAA property damage per capita.
-#
-# This threshold was not preregistered and should be described as exploratory.
+# ==============================================================================
+# 14. EXPLORATORY SEVERE-DAMAGE COMPARISON
+# ==============================================================================
 
 ian_case <- ian_case %>%
 
   mutate(
 
+    # Exploratory descriptive threshold
     Severe_Damage =
       Damage_Per_Capita >= 2000,
 
@@ -451,22 +833,6 @@ ian_case <- ian_case %>%
   )
 
 
-cat("\n========================================\n")
-cat("SEVERE-DAMAGE GROUP COUNTS\n")
-cat("========================================\n")
-
-print(
-  ian_case %>%
-    count(
-      Damage_Group
-    )
-)
-
-
-# ------------------------------------------------------------------------------
-# 12. Descriptive group statistics
-# ------------------------------------------------------------------------------
-
 severe_group_summary <- ian_case %>%
 
   group_by(
@@ -478,19 +844,19 @@ severe_group_summary <- ian_case %>%
     N =
       n(),
 
-    Mean_Unexpected_Resilience =
+    Mean_Unexpected =
       mean(
         Unexpected_Resilience,
         na.rm = TRUE
       ),
 
-    Median_Unexpected_Resilience =
+    Median_Unexpected =
       median(
         Unexpected_Resilience,
         na.rm = TRUE
       ),
 
-    SD_Unexpected_Resilience =
+    SD_Unexpected =
       sd(
         Unexpected_Resilience,
         na.rm = TRUE
@@ -500,27 +866,16 @@ severe_group_summary <- ian_case %>%
   )
 
 
-cat("\n========================================\n")
-cat("SEVERE-DAMAGE GROUP SUMMARY\n")
-cat("========================================\n")
-
-print(
-  severe_group_summary
-)
-
-
-# ------------------------------------------------------------------------------
-# 13. Exploratory Wilcoxon rank-sum test
-# ------------------------------------------------------------------------------
-
 wilcox_test <- wilcox.test(
 
   Unexpected_Resilience ~
     Severe_Damage,
 
-  data = ian_case,
+  data =
+    ian_case,
 
-  exact = FALSE
+  exact =
+    FALSE
 )
 
 
@@ -529,7 +884,7 @@ severe_group_test <- data.frame(
   Test =
     "Wilcoxon rank-sum",
 
-  Severe_Threshold_Per_Capita =
+  Threshold =
     2000,
 
   Severe_N =
@@ -553,17 +908,24 @@ severe_group_test <- data.frame(
 
 
 cat("\n========================================\n")
-cat("EXPLORATORY SEVERE-DAMAGE TEST\n")
+cat("SEVERE-DAMAGE GROUP SUMMARY\n")
 cat("========================================\n")
+
+print(
+  severe_group_summary
+)
+
+
+cat("\nExploratory Wilcoxon test:\n")
 
 print(
   severe_group_test
 )
 
 
-# ------------------------------------------------------------------------------
-# 14. Leave-one-county-out damage regressions
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# 15. LEAVE-ONE-COUNTY-OUT DAMAGE REGRESSIONS
+# ==============================================================================
 
 leave_one_out_results <- lapply(
 
@@ -583,7 +945,8 @@ leave_one_out_results <- lapply(
       Unexpected_Resilience ~
         Log_Damage_Per_Capita,
 
-      data = loo_data
+      data =
+        loo_data
     )
 
 
@@ -597,11 +960,10 @@ leave_one_out_results <- lapply(
     )
 
 
-    removed_county <- ian_case %>%
+    removed_name <- ian_case %>%
 
       filter(
-        County_ID ==
-          county_to_remove
+        County_ID == county_to_remove
       ) %>%
 
       pull(
@@ -611,11 +973,8 @@ leave_one_out_results <- lapply(
 
     data.frame(
 
-      Removed_County_ID =
-        county_to_remove,
-
       Removed_County =
-        removed_county,
+        removed_name,
 
       Damage_Beta =
         coef_table[
@@ -641,168 +1000,82 @@ leave_one_out_results <- lapply(
   }
 ) %>%
 
-  bind_rows() %>%
-
-  arrange(
-    Damage_Beta
-  )
+  bind_rows()
 
 
 cat("\n========================================\n")
-cat("LEAVE-ONE-COUNTY-OUT RESULTS\n")
+cat("LEAVE-ONE-OUT STABILITY\n")
 cat("========================================\n")
 
-print(
-  leave_one_out_results,
-  n = Inf
-)
-
-
-# ------------------------------------------------------------------------------
-# 15. Leave-one-out directional stability
-# ------------------------------------------------------------------------------
-
-negative_loo_count <- sum(
-  leave_one_out_results$Damage_Beta < 0
-)
-
-
 cat(
-  "\nNegative damage coefficients in leave-one-out models:",
-  negative_loo_count,
+  "Negative coefficients:",
+  sum(
+    leave_one_out_results$Damage_Beta < 0
+  ),
   "of",
   nrow(leave_one_out_results),
   "\n"
 )
 
 
-# ------------------------------------------------------------------------------
-# 16. Identify most influential exclusions
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# 16. BENCHMARK ROBUSTNESS
+# ==============================================================================
 
-cat("\nMost negative leave-one-out slopes:\n")
-
-print(
-
-  leave_one_out_results %>%
-
-    arrange(
-      Damage_Beta
-    ) %>%
-
-    slice_head(
-      n = 5
-    )
-)
-
-
-cat("\nLeast negative leave-one-out slopes:\n")
-
-print(
-
-  leave_one_out_results %>%
-
-    arrange(
-      desc(
-        Damage_Beta
-      )
-    ) %>%
-
-    slice_head(
-      n = 5
-    )
-)
-
-
-# ------------------------------------------------------------------------------
-# 17. Index-weight sensitivity within Ian counties
-# ------------------------------------------------------------------------------
-
-ian_index_sensitivity <- ian_damage %>%
+benchmark_comparison <- primary_predictions %>%
 
   select(
     County_ID,
-    Log_Damage_Per_Capita
+    Actual,
+    Pred_Ensemble_GAFL =
+      Pred_Ensemble,
+    Unexpected_GAFL =
+      Unexpected_Resilience
+  ) %>%
+
+  left_join(
+    all_nonian_predictions,
+    by = "County_ID"
   ) %>%
 
   left_join(
 
-    resilience %>%
+    oof_predictions %>%
 
       select(
         County_ID,
-        Score_Equal,
-        Score_ReturnHeavy,
-        Score_DrawdownHeavy,
-        Score_RecoveryHeavy,
-        PCA_Resilience
+        Pred_Ensemble_OOF =
+          Pred_Ensemble,
+        Unexpected_OOF =
+          Unexpected_Resilience
+      ),
+
+    by = "County_ID"
+  ) %>%
+
+  left_join(
+
+    model_data %>%
+
+      select(
+        County_ID,
+        County
       ),
 
     by = "County_ID"
   )
 
 
-index_damage_sensitivity <- data.frame(
-
-  Measure = c(
-    "Equal weights",
-    "Return heavy",
-    "Drawdown heavy",
-    "Recovery heavy",
-    "PCA index"
-  ),
-
-  Spearman_Rho = c(
-
-    cor(
-      ian_index_sensitivity$Log_Damage_Per_Capita,
-      ian_index_sensitivity$Score_Equal,
-      method = "spearman",
-      use = "complete.obs"
-    ),
-
-    cor(
-      ian_index_sensitivity$Log_Damage_Per_Capita,
-      ian_index_sensitivity$Score_ReturnHeavy,
-      method = "spearman",
-      use = "complete.obs"
-    ),
-
-    cor(
-      ian_index_sensitivity$Log_Damage_Per_Capita,
-      ian_index_sensitivity$Score_DrawdownHeavy,
-      method = "spearman",
-      use = "complete.obs"
-    ),
-
-    cor(
-      ian_index_sensitivity$Log_Damage_Per_Capita,
-      ian_index_sensitivity$Score_RecoveryHeavy,
-      method = "spearman",
-      use = "complete.obs"
-    ),
-
-    cor(
-      ian_index_sensitivity$Log_Damage_Per_Capita,
-      ian_index_sensitivity$PCA_Resilience,
-      method = "spearman",
-      use = "complete.obs"
-    )
-  )
-)
 
 
-cat("\n========================================\n")
-cat("INDEX-SPECIFICATION SENSITIVITY\n")
-cat("========================================\n")
 
-print(
-  index_damage_sensitivity
-)
+# ==============================================================================
+# 17. SAVE RESULTS
+# ==============================================================================
 
 
 # ------------------------------------------------------------------------------
-# 18. Save local analytical object
+# Local analytical object
 # ------------------------------------------------------------------------------
 
 saveRDS(
@@ -812,7 +1085,7 @@ saveRDS(
 
 
 # ------------------------------------------------------------------------------
-# 19. Save public results
+# Public Ian county table
 # ------------------------------------------------------------------------------
 
 write_csv(
@@ -832,6 +1105,9 @@ write_csv(
       Post_Volatility,
       Resilience_Z,
       Florida_Resilience_Percentile,
+      Pred_LM,
+      Pred_ENet,
+      Pred_RF,
       Pred_Ensemble,
       Unexpected_Resilience,
       Damage_Group
@@ -866,52 +1142,115 @@ write_csv(
 
 
 write_csv(
-  index_damage_sensitivity,
-  "results/ian_index_damage_sensitivity.csv"
+  benchmark_robustness,
+  "results/ian_benchmark_robustness.csv"
 )
 
 
-# ------------------------------------------------------------------------------
-# 20. Final message
-# ------------------------------------------------------------------------------
+write_csv(
+  benchmark_comparison,
+  "results/ian_benchmark_prediction_comparison.csv"
+)
+
+
+primary_tuning_output <- primary_fit$tuning %>%
+
+  mutate(
+    Benchmark =
+      "GA + non-Ian Florida"
+  )
+
+
+all_nonian_tuning_output <- all_nonian_fit$tuning %>%
+
+  mutate(
+    Benchmark =
+      "AL + GA + non-Ian Florida"
+  )
+
+
+write_csv(
+
+  bind_rows(
+    primary_tuning_output,
+    all_nonian_tuning_output
+  ),
+
+  "results/ian_elastic_net_tuning.csv"
+)
+
+
+# ==============================================================================
+# 18. FINAL SUMMARY
+# ==============================================================================
 
 cat("\n========================================\n")
-cat("FILES SAVED\n")
+cat("IAN CASE STUDY COMPLETE\n")
 cat("========================================\n")
 
 cat(
-  "Local analytical object:",
-  "data/ian_case_study.rds\n"
+  "Primary benchmark training counties:",
+  nrow(ga_fl_train),
+  "\n"
 )
 
 cat(
-  "Public Ian county results:",
-  "results/ian_case_study.csv\n"
+  "Ian holdout counties:",
+  nrow(ian_case),
+  "\n"
 )
 
 cat(
-  "Damage association:",
-  "results/ian_damage_association.csv\n"
+  "Spearman damage correlation:",
+  round(
+    unname(
+      spearman_test$estimate
+    ),
+    4
+  ),
+  "\n"
 )
 
 cat(
-  "Severe group summary:",
-  "results/ian_severe_group_summary.csv\n"
+  "Spearman p-value:",
+  round(
+    spearman_test$p.value,
+    4
+  ),
+  "\n"
 )
 
 cat(
-  "Severe group test:",
-  "results/ian_severe_group_comparison.csv\n"
+  "OLS damage coefficient:",
+  round(
+    damage_coef[
+      "Log_Damage_Per_Capita",
+      "Estimate"
+    ],
+    4
+  ),
+  "\n"
 )
 
 cat(
-  "Leave-one-out sensitivity:",
-  "results/ian_leave_one_out.csv\n"
+  "OLS p-value:",
+  round(
+    damage_coef[
+      "Log_Damage_Per_Capita",
+      "Pr(>|t|)"
+    ],
+    4
+  ),
+  "\n"
 )
 
 cat(
-  "Index sensitivity:",
-  "results/ian_index_damage_sensitivity.csv\n"
+  "Severe-group Wilcoxon p-value:",
+  round(
+    wilcox_test$p.value,
+    4
+  ),
+  "\n"
 )
 
 cat(
