@@ -1,7 +1,5 @@
 # ==============================================================================
-# 03_build_resilience_index.R
-#
-# Hurricane Ian Housing Resilience Project
+# build_resilience_index.R
 #
 # Purpose:
 #   Construct county-level post-September-2022 housing resilience measures
