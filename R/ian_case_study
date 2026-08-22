@@ -1,1 +1,919 @@
+# ==============================================================================
+# ian_case_study.R
+#
+# Inputs:
+#   data/resilience_index.rds
+#   data/oof_predictions.rds
+#   data/ian_damage_per_capita.rds
+#
+# Outputs:
+#   data/ian_case_study.rds
+#   results/ian_case_study.csv
+#   results/ian_damage_association.csv
+#   results/ian_severe_group_comparison.csv
+#   results/ian_leave_one_out.csv
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+
+
+# ------------------------------------------------------------------------------
+# 1. Load inputs
+# ------------------------------------------------------------------------------
+
+required_files <- c(
+  "data/resilience_index.rds",
+  "data/oof_predictions.rds",
+  "data/ian_damage_per_capita.rds"
+)
+
+
+missing_files <- required_files[
+  !file.exists(required_files)
+]
+
+
+if (length(missing_files) > 0) {
+
+  stop(
+    paste(
+      "Missing required files:",
+      paste(missing_files, collapse = ", "),
+      "\nRun scripts 01-04 first."
+    )
+  )
+}
+
+
+resilience <- readRDS(
+  "data/resilience_index.rds"
+)
+
+oof_predictions <- readRDS(
+  "data/oof_predictions.rds"
+)
+
+ian_damage <- readRDS(
+  "data/ian_damage_per_capita.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 2. Construct Florida-specific resilience percentile
+# ------------------------------------------------------------------------------
+
+florida_resilience <- resilience %>%
+
+  filter(
+    State == "FL"
+  ) %>%
+
+  mutate(
+
+    Florida_Resilience_Percentile =
+      100 *
+      percent_rank(
+        Resilience_Z
+      )
+  ) %>%
+
+  select(
+    County_ID,
+    Florida_Resilience_Percentile
+  )
+
+
+# ------------------------------------------------------------------------------
+# 3. Merge Ian exposure, actual resilience, and OOF predictions
+# ------------------------------------------------------------------------------
+
+ian_case <- ian_damage %>%
+
+  select(
+    County_ID,
+    County,
+    State,
+    Population_2022,
+    Ian_Damage_Sum,
+    Ian_Event_Records,
+    Positive_Damage_Records,
+    Damage_Per_Capita,
+    Log_Damage_Per_Capita
+  ) %>%
+
+  left_join(
+
+    resilience %>%
+
+      select(
+        County_ID,
+        Return_24m,
+        Max_Drawdown,
+        Months_Below_Baseline,
+        Post_Volatility,
+        Resilience_Z,
+        Resilience_Score
+      ),
+
+    by = "County_ID"
+  ) %>%
+
+  left_join(
+    florida_resilience,
+    by = "County_ID"
+  ) %>%
+
+  left_join(
+
+    oof_predictions %>%
+
+      select(
+        County_ID,
+        Pred_LM,
+        Pred_ENet,
+        Pred_RF,
+        Pred_Ensemble,
+        Unexpected_Resilience
+      ),
+
+    by = "County_ID"
+  ) %>%
+
+  arrange(
+    desc(Damage_Per_Capita)
+  )
+
+
+# ------------------------------------------------------------------------------
+# 4. Validate Ian sample
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("IAN CASE-STUDY SAMPLE\n")
+cat("========================================\n")
+
+cat(
+  "Ian-exposed counties:",
+  nrow(ian_case),
+  "\n"
+)
+
+cat(
+  "Counties with positive NOAA property damage:",
+  sum(
+    ian_case$Damage_Per_Capita > 0,
+    na.rm = TRUE
+  ),
+  "\n"
+)
+
+cat(
+  "Counties with zero reported NOAA property damage:",
+  sum(
+    ian_case$Damage_Per_Capita == 0,
+    na.rm = TRUE
+  ),
+  "\n"
+)
+
+cat(
+  "Missing ensemble predictions:",
+  sum(
+    is.na(
+      ian_case$Pred_Ensemble
+    )
+  ),
+  "\n"
+)
+
+
+if (nrow(ian_case) != 20) {
+
+  warning(
+    paste(
+      "Expected 20 Ian counties but found",
+      nrow(ian_case)
+    )
+  )
+}
+
+
+if (
+  any(
+    is.na(
+      ian_case$Pred_Ensemble
+    )
+  )
+) {
+
+  warning(
+    "At least one Ian county is missing an out-of-fold prediction."
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 5. Display core Ian results
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("IAN COUNTY RESULTS\n")
+cat("========================================\n")
+
+print(
+
+  ian_case %>%
+
+    select(
+      County,
+      Damage_Per_Capita,
+      Return_24m,
+      Resilience_Z,
+      Pred_Ensemble,
+      Unexpected_Resilience,
+      Florida_Resilience_Percentile
+    ),
+
+  n = Inf
+)
+
+
+# ------------------------------------------------------------------------------
+# 6. Rank counties by unexpected resilience
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("MOST RESILIENT RELATIVE TO PREDICTION\n")
+cat("========================================\n")
+
+print(
+
+  ian_case %>%
+
+    arrange(
+      desc(
+        Unexpected_Resilience
+      )
+    ) %>%
+
+    select(
+      County,
+      Pred_Ensemble,
+      Resilience_Z,
+      Unexpected_Resilience,
+      Damage_Per_Capita
+    ) %>%
+
+    slice_head(
+      n = 10
+    )
+)
+
+
+cat("\n========================================\n")
+cat("LEAST RESILIENT RELATIVE TO PREDICTION\n")
+cat("========================================\n")
+
+print(
+
+  ian_case %>%
+
+    arrange(
+      Unexpected_Resilience
+    ) %>%
+
+    select(
+      County,
+      Pred_Ensemble,
+      Resilience_Z,
+      Unexpected_Resilience,
+      Damage_Per_Capita
+    ) %>%
+
+    slice_head(
+      n = 10
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 7. Spearman association:
+#    damage intensity vs unexpected resilience
+# ------------------------------------------------------------------------------
+
+spearman_test <- cor.test(
+
+  ian_case$Log_Damage_Per_Capita,
+
+  ian_case$Unexpected_Resilience,
+
+  method = "spearman",
+
+  exact = FALSE
+)
+
+
+# ------------------------------------------------------------------------------
+# 8. Pearson association
+# ------------------------------------------------------------------------------
+
+pearson_test <- cor.test(
+
+  ian_case$Log_Damage_Per_Capita,
+
+  ian_case$Unexpected_Resilience,
+
+  method = "pearson"
+)
+
+
+# ------------------------------------------------------------------------------
+# 9. Simple linear regression
+# ------------------------------------------------------------------------------
+
+damage_lm <- lm(
+
+  Unexpected_Resilience ~
+    Log_Damage_Per_Capita,
+
+  data = ian_case
+)
+
+
+damage_lm_summary <- summary(
+  damage_lm
+)
+
+
+damage_coef <- coef(
+  damage_lm_summary
+)
+
+
+# ------------------------------------------------------------------------------
+# 10. Save continuous-damage association results
+# ------------------------------------------------------------------------------
+
+damage_association <- data.frame(
+
+  Statistic = c(
+    "Spearman rho",
+    "Spearman p-value",
+    "Pearson r",
+    "Pearson p-value",
+    "Pearson CI lower",
+    "Pearson CI upper",
+    "OLS damage coefficient",
+    "OLS standard error",
+    "OLS p-value",
+    "OLS R-squared",
+    "OLS adjusted R-squared"
+  ),
+
+  Value = c(
+
+    unname(
+      spearman_test$estimate
+    ),
+
+    spearman_test$p.value,
+
+    unname(
+      pearson_test$estimate
+    ),
+
+    pearson_test$p.value,
+
+    pearson_test$conf.int[1],
+
+    pearson_test$conf.int[2],
+
+    damage_coef[
+      "Log_Damage_Per_Capita",
+      "Estimate"
+    ],
+
+    damage_coef[
+      "Log_Damage_Per_Capita",
+      "Std. Error"
+    ],
+
+    damage_coef[
+      "Log_Damage_Per_Capita",
+      "Pr(>|t|)"
+    ],
+
+    damage_lm_summary$r.squared,
+
+    damage_lm_summary$adj.r.squared
+  )
+)
+
+
+cat("\n========================================\n")
+cat("DAMAGE VS UNEXPECTED RESILIENCE\n")
+cat("========================================\n")
+
+print(
+  damage_association
+)
+
+
+# ------------------------------------------------------------------------------
+# 11. Exploratory severe-damage grouping
+# ------------------------------------------------------------------------------
+
+# Descriptive threshold:
+#
+# Severe damage = at least $2,000 of reported NOAA property damage per capita.
+#
+# This threshold was not preregistered and should be described as exploratory.
+
+ian_case <- ian_case %>%
+
+  mutate(
+
+    Severe_Damage =
+      Damage_Per_Capita >= 2000,
+
+    Damage_Group =
+      if_else(
+        Severe_Damage,
+        "Severe damage",
+        "Other Ian-exposed"
+      )
+  )
+
+
+cat("\n========================================\n")
+cat("SEVERE-DAMAGE GROUP COUNTS\n")
+cat("========================================\n")
+
+print(
+  ian_case %>%
+    count(
+      Damage_Group
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 12. Descriptive group statistics
+# ------------------------------------------------------------------------------
+
+severe_group_summary <- ian_case %>%
+
+  group_by(
+    Damage_Group
+  ) %>%
+
+  summarise(
+
+    N =
+      n(),
+
+    Mean_Unexpected_Resilience =
+      mean(
+        Unexpected_Resilience,
+        na.rm = TRUE
+      ),
+
+    Median_Unexpected_Resilience =
+      median(
+        Unexpected_Resilience,
+        na.rm = TRUE
+      ),
+
+    SD_Unexpected_Resilience =
+      sd(
+        Unexpected_Resilience,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+
+cat("\n========================================\n")
+cat("SEVERE-DAMAGE GROUP SUMMARY\n")
+cat("========================================\n")
+
+print(
+  severe_group_summary
+)
+
+
+# ------------------------------------------------------------------------------
+# 13. Exploratory Wilcoxon rank-sum test
+# ------------------------------------------------------------------------------
+
+wilcox_test <- wilcox.test(
+
+  Unexpected_Resilience ~
+    Severe_Damage,
+
+  data = ian_case,
+
+  exact = FALSE
+)
+
+
+severe_group_test <- data.frame(
+
+  Test =
+    "Wilcoxon rank-sum",
+
+  Severe_Threshold_Per_Capita =
+    2000,
+
+  Severe_N =
+    sum(
+      ian_case$Severe_Damage
+    ),
+
+  Other_N =
+    sum(
+      !ian_case$Severe_Damage
+    ),
+
+  W =
+    unname(
+      wilcox_test$statistic
+    ),
+
+  P_Value =
+    wilcox_test$p.value
+)
+
+
+cat("\n========================================\n")
+cat("EXPLORATORY SEVERE-DAMAGE TEST\n")
+cat("========================================\n")
+
+print(
+  severe_group_test
+)
+
+
+# ------------------------------------------------------------------------------
+# 14. Leave-one-county-out damage regressions
+# ------------------------------------------------------------------------------
+
+leave_one_out_results <- lapply(
+
+  ian_case$County_ID,
+
+  function(county_to_remove) {
+
+    loo_data <- ian_case %>%
+
+      filter(
+        County_ID != county_to_remove
+      )
+
+
+    fit <- lm(
+
+      Unexpected_Resilience ~
+        Log_Damage_Per_Capita,
+
+      data = loo_data
+    )
+
+
+    fit_summary <- summary(
+      fit
+    )
+
+
+    coef_table <- coef(
+      fit_summary
+    )
+
+
+    removed_county <- ian_case %>%
+
+      filter(
+        County_ID ==
+          county_to_remove
+      ) %>%
+
+      pull(
+        County
+      )
+
+
+    data.frame(
+
+      Removed_County_ID =
+        county_to_remove,
+
+      Removed_County =
+        removed_county,
+
+      Damage_Beta =
+        coef_table[
+          "Log_Damage_Per_Capita",
+          "Estimate"
+        ],
+
+      Standard_Error =
+        coef_table[
+          "Log_Damage_Per_Capita",
+          "Std. Error"
+        ],
+
+      P_Value =
+        coef_table[
+          "Log_Damage_Per_Capita",
+          "Pr(>|t|)"
+        ],
+
+      R_Squared =
+        fit_summary$r.squared
+    )
+  }
+) %>%
+
+  bind_rows() %>%
+
+  arrange(
+    Damage_Beta
+  )
+
+
+cat("\n========================================\n")
+cat("LEAVE-ONE-COUNTY-OUT RESULTS\n")
+cat("========================================\n")
+
+print(
+  leave_one_out_results,
+  n = Inf
+)
+
+
+# ------------------------------------------------------------------------------
+# 15. Leave-one-out directional stability
+# ------------------------------------------------------------------------------
+
+negative_loo_count <- sum(
+  leave_one_out_results$Damage_Beta < 0
+)
+
+
+cat(
+  "\nNegative damage coefficients in leave-one-out models:",
+  negative_loo_count,
+  "of",
+  nrow(leave_one_out_results),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 16. Identify most influential exclusions
+# ------------------------------------------------------------------------------
+
+cat("\nMost negative leave-one-out slopes:\n")
+
+print(
+
+  leave_one_out_results %>%
+
+    arrange(
+      Damage_Beta
+    ) %>%
+
+    slice_head(
+      n = 5
+    )
+)
+
+
+cat("\nLeast negative leave-one-out slopes:\n")
+
+print(
+
+  leave_one_out_results %>%
+
+    arrange(
+      desc(
+        Damage_Beta
+      )
+    ) %>%
+
+    slice_head(
+      n = 5
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 17. Index-weight sensitivity within Ian counties
+# ------------------------------------------------------------------------------
+
+ian_index_sensitivity <- ian_damage %>%
+
+  select(
+    County_ID,
+    Log_Damage_Per_Capita
+  ) %>%
+
+  left_join(
+
+    resilience %>%
+
+      select(
+        County_ID,
+        Score_Equal,
+        Score_ReturnHeavy,
+        Score_DrawdownHeavy,
+        Score_RecoveryHeavy,
+        PCA_Resilience
+      ),
+
+    by = "County_ID"
+  )
+
+
+index_damage_sensitivity <- data.frame(
+
+  Measure = c(
+    "Equal weights",
+    "Return heavy",
+    "Drawdown heavy",
+    "Recovery heavy",
+    "PCA index"
+  ),
+
+  Spearman_Rho = c(
+
+    cor(
+      ian_index_sensitivity$Log_Damage_Per_Capita,
+      ian_index_sensitivity$Score_Equal,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    cor(
+      ian_index_sensitivity$Log_Damage_Per_Capita,
+      ian_index_sensitivity$Score_ReturnHeavy,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    cor(
+      ian_index_sensitivity$Log_Damage_Per_Capita,
+      ian_index_sensitivity$Score_DrawdownHeavy,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    cor(
+      ian_index_sensitivity$Log_Damage_Per_Capita,
+      ian_index_sensitivity$Score_RecoveryHeavy,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    cor(
+      ian_index_sensitivity$Log_Damage_Per_Capita,
+      ian_index_sensitivity$PCA_Resilience,
+      method = "spearman",
+      use = "complete.obs"
+    )
+  )
+)
+
+
+cat("\n========================================\n")
+cat("INDEX-SPECIFICATION SENSITIVITY\n")
+cat("========================================\n")
+
+print(
+  index_damage_sensitivity
+)
+
+
+# ------------------------------------------------------------------------------
+# 18. Save local analytical object
+# ------------------------------------------------------------------------------
+
+saveRDS(
+  ian_case,
+  "data/ian_case_study.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 19. Save public results
+# ------------------------------------------------------------------------------
+
+write_csv(
+
+  ian_case %>%
+
+    select(
+      County,
+      State,
+      Population_2022,
+      Ian_Damage_Sum,
+      Damage_Per_Capita,
+      Log_Damage_Per_Capita,
+      Return_24m,
+      Max_Drawdown,
+      Months_Below_Baseline,
+      Post_Volatility,
+      Resilience_Z,
+      Florida_Resilience_Percentile,
+      Pred_Ensemble,
+      Unexpected_Resilience,
+      Damage_Group
+    ),
+
+  "results/ian_case_study.csv"
+)
+
+
+write_csv(
+  damage_association,
+  "results/ian_damage_association.csv"
+)
+
+
+write_csv(
+  severe_group_summary,
+  "results/ian_severe_group_summary.csv"
+)
+
+
+write_csv(
+  severe_group_test,
+  "results/ian_severe_group_comparison.csv"
+)
+
+
+write_csv(
+  leave_one_out_results,
+  "results/ian_leave_one_out.csv"
+)
+
+
+write_csv(
+  index_damage_sensitivity,
+  "results/ian_index_damage_sensitivity.csv"
+)
+
+
+# ------------------------------------------------------------------------------
+# 20. Final message
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("FILES SAVED\n")
+cat("========================================\n")
+
+cat(
+  "Local analytical object:",
+  "data/ian_case_study.rds\n"
+)
+
+cat(
+  "Public Ian county results:",
+  "results/ian_case_study.csv\n"
+)
+
+cat(
+  "Damage association:",
+  "results/ian_damage_association.csv\n"
+)
+
+cat(
+  "Severe group summary:",
+  "results/ian_severe_group_summary.csv\n"
+)
+
+cat(
+  "Severe group test:",
+  "results/ian_severe_group_comparison.csv\n"
+)
+
+cat(
+  "Leave-one-out sensitivity:",
+  "results/ian_leave_one_out.csv\n"
+)
+
+cat(
+  "Index sensitivity:",
+  "results/ian_index_damage_sensitivity.csv\n"
+)
+
+cat(
+  "\n05_ian_case_study.R completed successfully.\n"
+)
