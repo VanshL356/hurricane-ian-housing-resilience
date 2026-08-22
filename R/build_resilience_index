@@ -1,1 +1,745 @@
+# ==============================================================================
+# 03_build_resilience_index.R
+#
+# Hurricane Ian Housing Resilience Project
+#
+# Purpose:
+#   Construct county-level post-September-2022 housing resilience measures
+#   and validate the primary equal-weight resilience index against alternative
+#   weighting schemes and a PCA-based index.
+#
+# Input:
+#   data/panel_clean.rds
+#
+# Outputs:
+#   data/resilience_index.rds
+#   results/resilience_by_county.csv
+#   results/resilience_index_robustness.csv
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+
+
+# ------------------------------------------------------------------------------
+# 1. Load clean monthly panel
+# ------------------------------------------------------------------------------
+
+panel_file <- "data/panel_clean.rds"
+
+if (!file.exists(panel_file)) {
+  stop(
+    "Could not find data/panel_clean.rds. Run R/01_build_panel.R first."
+  )
+}
+
+panel <- readRDS(panel_file)
+
+
+# ------------------------------------------------------------------------------
+# 2. Key dates
+# ------------------------------------------------------------------------------
+
+baseline_date <- as.Date("2022-09-01")
+
+date_6m  <- as.Date("2023-03-01")
+date_12m <- as.Date("2023-09-01")
+date_24m <- as.Date("2024-09-01")
+
+post_end_date <- as.Date("2024-12-01")
+
+
+# ------------------------------------------------------------------------------
+# 3. Helper functions
+# ------------------------------------------------------------------------------
+
+value_at <- function(date, x, target_date) {
+
+  idx <- which(date == target_date)
+
+  if (length(idx) == 0) {
+    return(NA_real_)
+  }
+
+  x[idx[1]]
+}
+
+
+safe_mean <- function(x) {
+
+  if (length(x) == 0 || all(is.na(x))) {
+    return(NA_real_)
+  }
+
+  mean(x, na.rm = TRUE)
+}
+
+
+safe_sd <- function(x) {
+
+  if (sum(!is.na(x)) < 2) {
+    return(NA_real_)
+  }
+
+  sd(x, na.rm = TRUE)
+}
+
+
+# ------------------------------------------------------------------------------
+# 4. Monthly housing-value changes
+# ------------------------------------------------------------------------------
+
+panel_resilience <- panel %>%
+
+  arrange(
+    County_ID,
+    Date
+  ) %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  mutate(
+
+    Monthly_Log_Change =
+      log_ZHVI -
+      lag(log_ZHVI)
+
+  ) %>%
+
+  ungroup()
+
+
+# ------------------------------------------------------------------------------
+# 5. County-level housing returns
+# ------------------------------------------------------------------------------
+
+county_outcomes <- panel_resilience %>%
+
+  group_by(
+    County_ID,
+    County,
+    State
+  ) %>%
+
+  summarise(
+
+    Log_ZHVI_Sep22 =
+      value_at(
+        Date,
+        log_ZHVI,
+        baseline_date
+      ),
+
+    Log_ZHVI_Mar23 =
+      value_at(
+        Date,
+        log_ZHVI,
+        date_6m
+      ),
+
+    Log_ZHVI_Sep23 =
+      value_at(
+        Date,
+        log_ZHVI,
+        date_12m
+      ),
+
+    Log_ZHVI_Sep24 =
+      value_at(
+        Date,
+        log_ZHVI,
+        date_24m
+      ),
+
+    Log_ZHVI_Dec24 =
+      value_at(
+        Date,
+        log_ZHVI,
+        post_end_date
+      ),
+
+    .groups = "drop"
+  ) %>%
+
+  mutate(
+
+    # Exact percentage changes from log differences
+    Return_6m =
+      100 * (
+        exp(
+          Log_ZHVI_Mar23 -
+          Log_ZHVI_Sep22
+        ) - 1
+      ),
+
+    Return_12m =
+      100 * (
+        exp(
+          Log_ZHVI_Sep23 -
+          Log_ZHVI_Sep22
+        ) - 1
+      ),
+
+    Return_24m =
+      100 * (
+        exp(
+          Log_ZHVI_Sep24 -
+          Log_ZHVI_Sep22
+        ) - 1
+      ),
+
+    Return_to_Dec24 =
+      100 * (
+        exp(
+          Log_ZHVI_Dec24 -
+          Log_ZHVI_Sep22
+        ) - 1
+      )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 6. September 2022 baseline
+# ------------------------------------------------------------------------------
+
+baseline_values <- panel_resilience %>%
+
+  filter(
+    Date == baseline_date
+  ) %>%
+
+  select(
+    County_ID,
+    Baseline_Log_ZHVI = log_ZHVI
+  )
+
+
+# ------------------------------------------------------------------------------
+# 7. Post-event downside and volatility metrics
+# ------------------------------------------------------------------------------
+
+post_metrics <- panel_resilience %>%
+
+  filter(
+    Date >= as.Date("2022-10-01"),
+    Date <= post_end_date
+  ) %>%
+
+  left_join(
+    baseline_values,
+    by = "County_ID"
+  ) %>%
+
+  group_by(
+    County_ID
+  ) %>%
+
+  summarise(
+
+    # Lowest percentage change relative to September 2022
+    Max_Drawdown =
+      if (
+        all(is.na(Baseline_Log_ZHVI)) ||
+        all(is.na(log_ZHVI))
+      ) {
+
+        NA_real_
+
+      } else {
+
+        min(
+          100 * (
+            exp(
+              log_ZHVI -
+              first(Baseline_Log_ZHVI)
+            ) - 1
+          ),
+          na.rm = TRUE
+        )
+      },
+
+    # Number of months spent below the September 2022 baseline
+    Months_Below_Baseline =
+      if (all(is.na(Baseline_Log_ZHVI))) {
+
+        NA_real_
+
+      } else {
+
+        sum(
+          log_ZHVI <
+            first(Baseline_Log_ZHVI),
+          na.rm = TRUE
+        )
+      },
+
+    # Volatility of monthly housing-value changes
+    Post_Volatility =
+      safe_sd(
+        Monthly_Log_Change
+      ),
+
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------------------------
+# 8. Combine post-event outcomes
+# ------------------------------------------------------------------------------
+
+resilience_data <- county_outcomes %>%
+
+  left_join(
+    post_metrics,
+    by = "County_ID"
+  )
+
+
+# ------------------------------------------------------------------------------
+# 9. Construct primary resilience index
+# ------------------------------------------------------------------------------
+
+# All four components are oriented so that higher = more resilient:
+#
+#   Return_24m             higher is better
+#   Max_Drawdown           less negative is better
+#   Months_Below_Baseline  fewer months is better
+#   Post_Volatility        lower volatility is better
+
+resilience_index <- resilience_data %>%
+
+  filter(
+    is.finite(Return_24m),
+    is.finite(Max_Drawdown),
+    is.finite(Months_Below_Baseline),
+    is.finite(Post_Volatility)
+  ) %>%
+
+  mutate(
+
+    Z_Return24 =
+      as.numeric(
+        scale(Return_24m)
+      ),
+
+    Z_Drawdown =
+      as.numeric(
+        scale(Max_Drawdown)
+      ),
+
+    Z_Months_Below =
+      -as.numeric(
+        scale(Months_Below_Baseline)
+      ),
+
+    Z_Volatility =
+      -as.numeric(
+        scale(Post_Volatility)
+      ),
+
+    Resilience_Z =
+      (
+        Z_Return24 +
+        Z_Drawdown +
+        Z_Months_Below +
+        Z_Volatility
+      ) / 4,
+
+    # Percentile for easier communication.
+    # 100 = highest resilience in the analysis sample.
+    Resilience_Score =
+      100 *
+      percent_rank(
+        Resilience_Z
+      )
+  ) %>%
+
+  arrange(
+    desc(Resilience_Z)
+  )
+
+
+# ------------------------------------------------------------------------------
+# 10. Basic index diagnostics
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("RESILIENCE INDEX\n")
+cat("========================================\n")
+
+cat(
+  "Counties with complete resilience outcomes:",
+  nrow(resilience_index),
+  "\n"
+)
+
+cat(
+  "Mean Resilience_Z:",
+  round(
+    mean(resilience_index$Resilience_Z),
+    4
+  ),
+  "\n"
+)
+
+cat(
+  "SD Resilience_Z:",
+  round(
+    sd(resilience_index$Resilience_Z),
+    4
+  ),
+  "\n"
+)
+
+
+cat("\nHighest-resilience counties:\n")
+
+print(
+  resilience_index %>%
+    select(
+      County,
+      State,
+      Return_24m,
+      Max_Drawdown,
+      Months_Below_Baseline,
+      Post_Volatility,
+      Resilience_Z,
+      Resilience_Score
+    ) %>%
+    slice_head(n = 10)
+)
+
+
+cat("\nLowest-resilience counties:\n")
+
+print(
+  resilience_index %>%
+    select(
+      County,
+      State,
+      Return_24m,
+      Max_Drawdown,
+      Months_Below_Baseline,
+      Post_Volatility,
+      Resilience_Z,
+      Resilience_Score
+    ) %>%
+    slice_tail(n = 10)
+)
+
+
+# ------------------------------------------------------------------------------
+# 11. Florida-specific resilience percentile
+# ------------------------------------------------------------------------------
+
+resilience_fl <- resilience_index %>%
+
+  filter(
+    State == "FL"
+  ) %>%
+
+  mutate(
+
+    Florida_Resilience_Percentile =
+      100 *
+      percent_rank(
+        Resilience_Z
+      )
+  ) %>%
+
+  arrange(
+    desc(Resilience_Z)
+  )
+
+
+# ------------------------------------------------------------------------------
+# 12. Alternative index weighting schemes
+# ------------------------------------------------------------------------------
+
+resilience_sensitivity <- resilience_index %>%
+
+  mutate(
+
+    # Primary specification
+    Score_Equal =
+      0.25 * Z_Return24 +
+      0.25 * Z_Drawdown +
+      0.25 * Z_Months_Below +
+      0.25 * Z_Volatility,
+
+    # Greater emphasis on 24-month appreciation
+    Score_ReturnHeavy =
+      0.40 * Z_Return24 +
+      0.25 * Z_Drawdown +
+      0.20 * Z_Months_Below +
+      0.15 * Z_Volatility,
+
+    # Greater emphasis on downside protection
+    Score_DrawdownHeavy =
+      0.25 * Z_Return24 +
+      0.40 * Z_Drawdown +
+      0.20 * Z_Months_Below +
+      0.15 * Z_Volatility,
+
+    # Greater emphasis on speed/persistence of recovery
+    Score_RecoveryHeavy =
+      0.25 * Z_Return24 +
+      0.20 * Z_Drawdown +
+      0.40 * Z_Months_Below +
+      0.15 * Z_Volatility
+  )
+
+
+# ------------------------------------------------------------------------------
+# 13. PCA-based resilience index
+# ------------------------------------------------------------------------------
+
+pca_variables <- resilience_sensitivity %>%
+
+  select(
+    Z_Return24,
+    Z_Drawdown,
+    Z_Months_Below,
+    Z_Volatility
+  )
+
+
+pca_fit <- prcomp(
+  pca_variables,
+  center = FALSE,
+  scale. = FALSE
+)
+
+
+resilience_sensitivity$PCA_Resilience <-
+  pca_fit$x[, 1]
+
+
+# PCA signs are arbitrary.
+# Orient PC1 so higher values correspond to higher equal-weight resilience.
+
+pca_equal_correlation <- cor(
+  resilience_sensitivity$PCA_Resilience,
+  resilience_sensitivity$Score_Equal,
+  use = "complete.obs"
+)
+
+
+if (pca_equal_correlation < 0) {
+
+  resilience_sensitivity$PCA_Resilience <-
+    -resilience_sensitivity$PCA_Resilience
+}
+
+
+# ------------------------------------------------------------------------------
+# 14. Rank-correlation robustness
+# ------------------------------------------------------------------------------
+
+index_correlations <- cor(
+
+  resilience_sensitivity %>%
+
+    select(
+      Score_Equal,
+      Score_ReturnHeavy,
+      Score_DrawdownHeavy,
+      Score_RecoveryHeavy,
+      PCA_Resilience
+    ),
+
+  method = "spearman",
+
+  use = "complete.obs"
+)
+
+
+cat("\n========================================\n")
+cat("INDEX ROBUSTNESS\n")
+cat("========================================\n")
+
+cat("\nSpearman rank correlations:\n")
+
+print(
+  round(
+    index_correlations,
+    4
+  )
+)
+
+
+cat("\nPCA variance explained:\n")
+
+print(
+  summary(pca_fit)
+)
+
+
+cat("\nPCA component loadings:\n")
+
+print(
+  pca_fit$rotation
+)
+
+
+# ------------------------------------------------------------------------------
+# 15. Compare each alternative to primary equal-weight score
+# ------------------------------------------------------------------------------
+
+robustness_table <- data.frame(
+
+  Specification = c(
+    "Equal weight",
+    "Return heavy",
+    "Drawdown heavy",
+    "Recovery heavy",
+    "PCA"
+  ),
+
+  Spearman_vs_Equal = c(
+
+    1,
+
+    cor(
+      resilience_sensitivity$Score_Equal,
+      resilience_sensitivity$Score_ReturnHeavy,
+      method = "spearman"
+    ),
+
+    cor(
+      resilience_sensitivity$Score_Equal,
+      resilience_sensitivity$Score_DrawdownHeavy,
+      method = "spearman"
+    ),
+
+    cor(
+      resilience_sensitivity$Score_Equal,
+      resilience_sensitivity$Score_RecoveryHeavy,
+      method = "spearman"
+    ),
+
+    cor(
+      resilience_sensitivity$Score_Equal,
+      resilience_sensitivity$PCA_Resilience,
+      method = "spearman"
+    )
+  )
+)
+
+
+print(
+  robustness_table
+)
+
+
+# ------------------------------------------------------------------------------
+# 16. Add alternative index measures back to final object
+# ------------------------------------------------------------------------------
+
+resilience_final <- resilience_sensitivity %>%
+
+  select(
+    County_ID,
+    County,
+    State,
+
+    Return_6m,
+    Return_12m,
+    Return_24m,
+    Return_to_Dec24,
+
+    Max_Drawdown,
+    Months_Below_Baseline,
+    Post_Volatility,
+
+    Z_Return24,
+    Z_Drawdown,
+    Z_Months_Below,
+    Z_Volatility,
+
+    Resilience_Z,
+    Resilience_Score,
+
+    Score_Equal,
+    Score_ReturnHeavy,
+    Score_DrawdownHeavy,
+    Score_RecoveryHeavy,
+    PCA_Resilience
+  )
+
+
+# ------------------------------------------------------------------------------
+# 17. Save analytical object locally
+# ------------------------------------------------------------------------------
+
+saveRDS(
+  resilience_final,
+  "data/resilience_index.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 18. Save public county-level results
+# ------------------------------------------------------------------------------
+
+write_csv(
+
+  resilience_final %>%
+
+    select(
+      County,
+      State,
+      Return_24m,
+      Max_Drawdown,
+      Months_Below_Baseline,
+      Post_Volatility,
+      Resilience_Z,
+      Resilience_Score
+    ),
+
+  "results/resilience_by_county.csv"
+)
+
+
+# ------------------------------------------------------------------------------
+# 19. Save index robustness results
+# ------------------------------------------------------------------------------
+
+write_csv(
+  robustness_table,
+  "results/resilience_index_robustness.csv"
+)
+
+
+# ------------------------------------------------------------------------------
+# 20. Final message
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("FILES SAVED\n")
+cat("========================================\n")
+
+cat(
+  "Local analytical object:",
+  "data/resilience_index.rds\n"
+)
+
+cat(
+  "Public county results:",
+  "results/resilience_by_county.csv\n"
+)
+
+cat(
+  "Index robustness:",
+  "results/resilience_index_robustness.csv\n"
+)
+
+cat(
+  "\n03_build_resilience_index.R completed successfully.\n"
+)
