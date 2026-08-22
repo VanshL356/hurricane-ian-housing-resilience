@@ -321,15 +321,9 @@ ggsave(
   dpi = 300
 )
 
-
 # ==============================================================================
-# FIGURE 3: ACTUAL VS PREDICTED RESILIENCE
+# FIGURE 3: IAN HOLDOUT — ACTUAL VS PREDICTED RESILIENCE
 # ==============================================================================
-
-
-# ------------------------------------------------------------------------------
-# 8. Calculate shared axis limits
-# ------------------------------------------------------------------------------
 
 actual_predicted_range <- range(
   c(
@@ -339,12 +333,7 @@ actual_predicted_range <- range(
   na.rm = TRUE
 )
 
-
-plot_padding <- 0.08 *
-  diff(
-    actual_predicted_range
-  )
-
+plot_padding <- 0.08 * diff(actual_predicted_range)
 
 axis_limits <- c(
   actual_predicted_range[1] - plot_padding,
@@ -352,26 +341,19 @@ axis_limits <- c(
 )
 
 
-# ------------------------------------------------------------------------------
-# 9. Actual vs predicted plot
-# ------------------------------------------------------------------------------
-
 p_actual_predicted <- ggplot(
-
   ian_case,
-
   aes(
     x = Pred_Ensemble,
     y = Resilience_Z
   )
-
 ) +
 
   geom_abline(
     intercept = 0,
     slope = 1,
     linetype = "dashed",
-    linewidth = 0.55
+    linewidth = 0.5
   ) +
 
   geom_point(
@@ -379,10 +361,8 @@ p_actual_predicted <- ggplot(
   ) +
 
   geom_text_repel(
-    aes(
-      label = County
-    ),
-    size = 3.6,
+    aes(label = County),
+    size = 3.5,
     box.padding = 0.35,
     point.padding = 0.2,
     min.segment.length = 0,
@@ -398,17 +378,18 @@ p_actual_predicted <- ggplot(
   labs(
     title = "Florida Housing Resilience: Actual vs. Predicted",
     subtitle = paste0(
-      "Hurricane Ian-exposed counties\n",
+      "Ian-exposed counties held entirely out of model training\n",
       "Below the 45° line = less resilient than predicted"
     ),
     x = "Predicted Resilience (z-score)",
     y = "Actual Resilience (z-score)",
-    caption = "Predictions are out-of-fold and use only pre-Ian housing and economic characteristics."
+    caption = paste0(
+      "Benchmark models trained on 198 Georgia and Florida counties ",
+      "outside the designated Ian-exposed group."
+    )
   ) +
 
-  theme_minimal(
-    base_size = 13
-  ) +
+  theme_minimal(base_size = 13) +
 
   theme(
     panel.grid.minor = element_blank(),
@@ -421,14 +402,15 @@ p_actual_predicted <- ggplot(
       lineheight = 1.2
     ),
     plot.caption = element_text(
-      hjust = 0
+      hjust = 0,
+      size = 9
     )
   )
 
 
 ggsave(
-  filename = "figures/03_florida_actual_vs_predicted.png",
-  plot = p_actual_predicted,
+  "figures/03_florida_actual_vs_predicted.png",
+  p_actual_predicted,
   width = 8,
   height = 7,
   dpi = 300
@@ -436,23 +418,15 @@ ggsave(
 
 
 # ==============================================================================
-# FIGURE 4: DAMAGE VS UNEXPECTED RESILIENCE
+# FIGURE 4: NOAA DAMAGE VS UNEXPECTED RESILIENCE
 # ==============================================================================
 
-
-# ------------------------------------------------------------------------------
-# 10. Damage association plot
-# ------------------------------------------------------------------------------
-
 p_damage_resilience <- ggplot(
-
   ian_case,
-
   aes(
     x = Log_Damage_Per_Capita,
     y = Unexpected_Resilience
   )
-
 ) +
 
   geom_hline(
@@ -473,11 +447,7 @@ p_damage_resilience <- ggplot(
   ) +
 
   geom_text_repel(
-
-    aes(
-      label = County
-    ),
-
+    aes(label = County),
     size = 3.3,
     box.padding = 0.35,
     point.padding = 0.2,
@@ -489,20 +459,19 @@ p_damage_resilience <- ggplot(
   labs(
     title = "Hurricane Ian Damage and Unexpected Housing Resilience",
     subtitle = paste0(
-      "Negative values indicate less resilience than predicted by ",
-      "pre-Ian fundamentals"
+      "Actual minus predicted resilience among 20 Ian-exposed Florida counties\n",
+      "Predictions come from models trained without the Ian counties"
     ),
     x = "Log(1 + NOAA property damage per capita)",
     y = "Unexpected Resilience (Actual − Predicted)",
     caption = paste0(
-      "Ian-exposed Florida counties only. ",
+      "Spearman ρ = -0.305 (p = 0.192). ",
+      "OLS β = -0.064 (p = 0.126). ",
       "Association is descriptive, not causal."
     )
   ) +
 
-  theme_minimal(
-    base_size = 13
-  ) +
+  theme_minimal(base_size = 13) +
 
   theme(
     panel.grid.minor = element_blank(),
@@ -511,22 +480,23 @@ p_damage_resilience <- ggplot(
       size = 17
     ),
     plot.subtitle = element_text(
-      size = 12
+      size = 11.5,
+      lineheight = 1.2
     ),
     plot.caption = element_text(
-      hjust = 0
+      hjust = 0,
+      size = 9
     )
   )
 
 
 ggsave(
-  filename = "figures/04_damage_unexpected_resilience.png",
-  plot = p_damage_resilience,
+  "figures/04_damage_unexpected_resilience.png",
+  p_damage_resilience,
   width = 8,
   height = 6.5,
   dpi = 300
 )
-
 
 # ==============================================================================
 # FINAL SUMMARY
