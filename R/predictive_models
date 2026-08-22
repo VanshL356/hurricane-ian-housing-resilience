@@ -1,10 +1,6 @@
 # ==============================================================================
 # predictive_models.R
 #
-# Purpose:
-#   Predict county-level post-2022 housing resilience using only information
-#   available before Hurricane Ian.
-#
 # Models:
 #   1. Linear regression
 #   2. Elastic net
