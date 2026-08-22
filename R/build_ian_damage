@@ -1,1 +1,765 @@
+# ==============================================================================
+# 02_build_ian_damage.R
+#
+# Hurricane Ian Housing Resilience Project
+#
+# Input:
+#   data/panel_clean.rds
+#
+# Outputs:
+#   data/ian_damage_per_capita.rds
+#   results/ian_damage_by_county.csv
+#
+# Notes:
+#   NOAA Storm Events mixes county ("C") and forecast-zone ("Z") geography.
+#   Hurricane Ian records therefore require cleaning forecast-zone names
+#   such as "COASTAL LEE" and "INLAND CHARLOTTE" back to county names.
+# ==============================================================================
 
+
+# ------------------------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------------------------
+
+library(dplyr)
+library(readr)
+library(stringr)
+library(rvest)
+library(lubridate)
+
+
+# ------------------------------------------------------------------------------
+# 1. Load cleaned county panel
+# ------------------------------------------------------------------------------
+
+panel_file <- "data/panel_clean.rds"
+
+if (!file.exists(panel_file)) {
+  stop(
+    "Could not find data/panel_clean.rds. Run R/01_build_panel.R first."
+  )
+}
+
+panel_clean <- readRDS(panel_file)
+
+
+# ------------------------------------------------------------------------------
+# 2. Identify the 20 Ian-exposed Florida counties from the panel
+# ------------------------------------------------------------------------------
+
+ian_counties <- panel_clean %>%
+
+  group_by(
+    County_ID,
+    County,
+    State
+  ) %>%
+
+  summarise(
+    Ever_Treated = max(Treatment, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+
+  filter(
+    Ever_Treated == 1,
+    State == "FL"
+  ) %>%
+
+  mutate(
+    County_Upper = toupper(trimws(County))
+  )
+
+
+cat("\n========================================\n")
+cat("IAN-EXPOSED COUNTIES\n")
+cat("========================================\n")
+
+cat(
+  "Number of exposed Florida counties:",
+  nrow(ian_counties),
+  "\n"
+)
+
+print(
+  ian_counties %>%
+    select(County_ID, County)
+)
+
+
+if (nrow(ian_counties) != 20) {
+  warning(
+    paste(
+      "Expected 20 Ian-exposed Florida counties but found",
+      nrow(ian_counties)
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. Retrieve the current NOAA 2022 Storm Events details filename
+# ------------------------------------------------------------------------------
+
+noaa_directory <-
+  "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
+
+
+cat("\n========================================\n")
+cat("NOAA DOWNLOAD\n")
+cat("========================================\n")
+
+cat("Reading NOAA Storm Events directory...\n")
+
+
+noaa_index <- read_html(noaa_directory)
+
+
+noaa_links <- noaa_index %>%
+  html_elements("a") %>%
+  html_attr("href")
+
+
+details_2022_files <- noaa_links[
+  str_detect(
+    noaa_links,
+    "^StormEvents_details-ftp_v1\\.0_d2022_c[0-9]+\\.csv\\.gz$"
+  )
+]
+
+
+if (length(details_2022_files) == 0) {
+  stop("Could not identify the NOAA 2022 Storm Events details file.")
+}
+
+
+# If NOAA lists more than one version, use the most recently revised filename.
+details_2022_file <- sort(details_2022_files, decreasing = TRUE)[1]
+
+
+noaa_url <- paste0(
+  noaa_directory,
+  details_2022_file
+)
+
+
+cat(
+  "Using NOAA file:",
+  details_2022_file,
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 4. Download/import NOAA Storm Events data
+# ------------------------------------------------------------------------------
+
+noaa_2022 <- read_csv(
+  noaa_url,
+  show_col_types = FALSE,
+  progress = FALSE
+)
+
+
+cat(
+  "NOAA records imported:",
+  nrow(noaa_2022),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 5. Confirm required NOAA columns
+# ------------------------------------------------------------------------------
+
+required_noaa_columns <- c(
+  "EPISODE_ID",
+  "EVENT_ID",
+  "STATE",
+  "CZ_TYPE",
+  "CZ_NAME",
+  "BEGIN_DATE_TIME",
+  "EVENT_TYPE",
+  "DAMAGE_PROPERTY",
+  "DAMAGE_CROPS",
+  "EPISODE_NARRATIVE",
+  "EVENT_NARRATIVE"
+)
+
+
+missing_noaa_columns <- setdiff(
+  required_noaa_columns,
+  names(noaa_2022)
+)
+
+
+if (length(missing_noaa_columns) > 0) {
+  stop(
+    paste(
+      "Missing required NOAA columns:",
+      paste(missing_noaa_columns, collapse = ", ")
+    )
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 6. Identify Hurricane Ian episodes
+# ------------------------------------------------------------------------------
+
+# These episode IDs were identified from NOAA narratives describing
+# Hurricane Ian's September 2022 Florida impacts.
+#
+# Explicit IDs are used rather than relying only on event type because
+# one hurricane can generate multiple event types, including storm surge,
+# flooding, high wind, tropical storm conditions, and tornadoes.
+
+ian_episode_ids <- c(
+  174632,
+  174305,
+  173080,
+  174569
+)
+
+
+ian_events <- noaa_2022 %>%
+
+  filter(
+    EPISODE_ID %in% ian_episode_ids,
+    toupper(STATE) == "FLORIDA"
+  )
+
+
+cat("\n========================================\n")
+cat("HURRICANE IAN NOAA RECORDS\n")
+cat("========================================\n")
+
+cat(
+  "Ian event records:",
+  nrow(ian_events),
+  "\n"
+)
+
+cat(
+  "Unique NOAA episodes:",
+  n_distinct(ian_events$EPISODE_ID),
+  "\n"
+)
+
+cat(
+  "Unique event IDs:",
+  n_distinct(ian_events$EVENT_ID),
+  "\n"
+)
+
+
+# Diagnostic: show Ian event types
+print(
+  ian_events %>%
+    count(EVENT_TYPE, sort = TRUE)
+)
+
+
+# ------------------------------------------------------------------------------
+# 7. Parse NOAA damage strings
+# ------------------------------------------------------------------------------
+
+# NOAA represents damages as strings such as:
+#
+#   "7.00B"
+#   "206.00M"
+#   "1000.00K"
+#   "500"
+#
+# This function converts them to numeric dollars.
+
+parse_noaa_damage <- function(x) {
+
+  x <- toupper(
+    trimws(
+      as.character(x)
+    )
+  )
+
+  x[
+    x %in% c(
+      "",
+      "NA",
+      "N/A",
+      "NULL"
+    )
+  ] <- NA_character_
+
+
+  multiplier <- case_when(
+
+    str_detect(x, "K$") ~ 1e3,
+
+    str_detect(x, "M$") ~ 1e6,
+
+    str_detect(x, "B$") ~ 1e9,
+
+    TRUE ~ 1
+  )
+
+
+  numeric_part <- suppressWarnings(
+    as.numeric(
+      str_remove(
+        x,
+        "[KMB]$"
+      )
+    )
+  )
+
+
+  numeric_part * multiplier
+}
+
+
+ian_events <- ian_events %>%
+
+  mutate(
+
+    Property_Damage =
+      parse_noaa_damage(DAMAGE_PROPERTY),
+
+    Crop_Damage =
+      parse_noaa_damage(DAMAGE_CROPS),
+
+    Property_Damage =
+      coalesce(
+        Property_Damage,
+        0
+      ),
+
+    Crop_Damage =
+      coalesce(
+        Crop_Damage,
+        0
+      )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 8. Clean NOAA county / forecast-zone geography
+# ------------------------------------------------------------------------------
+
+# NOAA uses:
+#
+#   CZ_TYPE == "C"  -> county
+#   CZ_TYPE == "Z"  -> forecast zone
+#
+# Forecast zones often contain county names with modifiers such as:
+#
+#   COASTAL LEE
+#   INLAND CHARLOTTE
+#
+# Those modifiers must be removed before matching to the county panel.
+
+
+clean_noaa_county <- function(x) {
+
+  x <- toupper(
+    str_squish(
+      as.character(x)
+    )
+  )
+
+
+  # Remove common NOAA forecast-zone geographic modifiers.
+  x <- str_remove(
+    x,
+    paste0(
+      "^(",
+      "COASTAL|",
+      "INLAND|",
+      "MAINLAND|",
+      "NORTHERN|",
+      "SOUTHERN|",
+      "EASTERN|",
+      "WESTERN|",
+      "NORTH|",
+      "SOUTH|",
+      "EAST|",
+      "WEST|",
+      "CENTRAL|",
+      "NORTHEASTERN|",
+      "NORTHWESTERN|",
+      "SOUTHEASTERN|",
+      "SOUTHWESTERN",
+      ")\\s+"
+    )
+  )
+
+
+  # Known NOAA spelling issue in Ian records.
+  x <- recode(
+    x,
+    "PUTNUM" = "PUTNAM"
+  )
+
+
+  str_squish(x)
+}
+
+
+ian_events <- ian_events %>%
+
+  mutate(
+
+    NOAA_Geography_Raw =
+      toupper(
+        str_squish(
+          CZ_NAME
+        )
+      ),
+
+    County_Upper =
+      clean_noaa_county(
+        CZ_NAME
+      )
+  )
+
+
+# ------------------------------------------------------------------------------
+# 9. Restrict geography to counties represented in the study
+# ------------------------------------------------------------------------------
+
+ian_events_matched <- ian_events %>%
+
+  filter(
+    County_Upper %in%
+      ian_counties$County_Upper
+  )
+
+
+cat("\n========================================\n")
+cat("GEOGRAPHY MATCHING\n")
+cat("========================================\n")
+
+cat(
+  "Ian records matched to study counties:",
+  nrow(ian_events_matched),
+  "\n"
+)
+
+
+matched_counties <- sort(
+  unique(
+    ian_events_matched$County_Upper
+  )
+)
+
+
+cat(
+  "Study counties appearing in NOAA Ian records:",
+  length(matched_counties),
+  "\n"
+)
+
+
+print(
+  matched_counties
+)
+
+
+# ------------------------------------------------------------------------------
+# 10. Inspect unmatched NOAA Ian geography
+# ------------------------------------------------------------------------------
+
+unmatched_geography <- ian_events %>%
+
+  filter(
+    !County_Upper %in%
+      ian_counties$County_Upper
+  ) %>%
+
+  count(
+    CZ_TYPE,
+    NOAA_Geography_Raw,
+    County_Upper,
+    sort = TRUE
+  )
+
+
+cat(
+  "\nIan NOAA geographies not matched to the 20 study counties:\n"
+)
+
+print(
+  unmatched_geography,
+  n = Inf
+)
+
+
+# ------------------------------------------------------------------------------
+# 11. Aggregate Ian property damage by county
+# ------------------------------------------------------------------------------
+
+ian_damage_raw <- ian_events_matched %>%
+
+  group_by(
+    County_Upper
+  ) %>%
+
+  summarise(
+
+    Ian_Damage_Sum =
+      sum(
+        Property_Damage,
+        na.rm = TRUE
+      ),
+
+    Ian_Damage_Max =
+      max(
+        Property_Damage,
+        na.rm = TRUE
+      ),
+
+    Ian_Event_Records =
+      n(),
+
+    Positive_Damage_Records =
+      sum(
+        Property_Damage > 0,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+
+# ------------------------------------------------------------------------------
+# 12. Construct 2022 county population
+# ------------------------------------------------------------------------------
+
+population_2022 <- panel_clean %>%
+
+  filter(
+    State == "FL",
+    Year == 2022
+  ) %>%
+
+  group_by(
+    County_ID,
+    County,
+    County_Upper
+  ) %>%
+
+  summarise(
+
+    Population_2022 =
+      mean(
+        Population,
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+
+# ------------------------------------------------------------------------------
+# 13. Merge all 20 exposed counties
+# ------------------------------------------------------------------------------
+
+# Start from the full 20-county list so counties with no reported NOAA
+# property damage are retained with zero damage rather than disappearing.
+
+damage_per_capita <- ian_counties %>%
+
+  select(
+    County_ID,
+    County,
+    State,
+    County_Upper
+  ) %>%
+
+  left_join(
+    ian_damage_raw,
+    by = "County_Upper"
+  ) %>%
+
+  left_join(
+    population_2022 %>%
+      select(
+        County_ID,
+        Population_2022
+      ),
+    by = "County_ID"
+  ) %>%
+
+  mutate(
+
+    Ian_Damage_Sum =
+      coalesce(
+        Ian_Damage_Sum,
+        0
+      ),
+
+    Ian_Damage_Max =
+      coalesce(
+        Ian_Damage_Max,
+        0
+      ),
+
+    Ian_Event_Records =
+      coalesce(
+        Ian_Event_Records,
+        0L
+      ),
+
+    Positive_Damage_Records =
+      coalesce(
+        Positive_Damage_Records,
+        0L
+      ),
+
+    Damage_Per_Capita =
+      Ian_Damage_Sum /
+      Population_2022,
+
+    # log1p retains counties with zero reported property damage.
+    Log_Damage_Per_Capita =
+      log1p(
+        Damage_Per_Capita
+      )
+  ) %>%
+
+  arrange(
+    desc(Damage_Per_Capita)
+  )
+
+
+# ------------------------------------------------------------------------------
+# 14. Validate final damage table
+# ------------------------------------------------------------------------------
+
+cat("\n========================================\n")
+cat("FINAL IAN DAMAGE TABLE\n")
+cat("========================================\n")
+
+cat(
+  "Counties:",
+  nrow(damage_per_capita),
+  "\n"
+)
+
+cat(
+  "Counties with positive reported damage:",
+  sum(
+    damage_per_capita$Ian_Damage_Sum > 0
+  ),
+  "\n"
+)
+
+cat(
+  "Counties with zero reported property damage:",
+  sum(
+    damage_per_capita$Ian_Damage_Sum == 0
+  ),
+  "\n\n"
+)
+
+
+print(
+  damage_per_capita %>%
+
+    select(
+      County,
+      Ian_Damage_Sum,
+      Population_2022,
+      Damage_Per_Capita,
+      Log_Damage_Per_Capita
+    ),
+  n = Inf
+)
+
+
+# ------------------------------------------------------------------------------
+# 15. Sanity checks
+# ------------------------------------------------------------------------------
+
+if (nrow(damage_per_capita) != 20) {
+  warning(
+    "Final Ian damage table does not contain exactly 20 counties."
+  )
+}
+
+
+if (
+  sum(
+    damage_per_capita$Ian_Damage_Sum > 0
+  ) != 18
+) {
+
+  warning(
+    paste0(
+      "Expected 18 of the 20 study counties to have positive NOAA ",
+      "property damage. Check NOAA file revisions or geography matching."
+    )
+  )
+}
+
+
+if (
+  any(
+    is.na(
+      damage_per_capita$Population_2022
+    )
+  )
+) {
+
+  warning(
+    "At least one Ian county is missing 2022 population."
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 16. Save machine-readable object
+# ------------------------------------------------------------------------------
+
+saveRDS(
+  damage_per_capita,
+  "data/ian_damage_per_capita.rds"
+)
+
+
+# ------------------------------------------------------------------------------
+# 17. Save small final results table for GitHub
+# ------------------------------------------------------------------------------
+
+write_csv(
+
+  damage_per_capita %>%
+
+    select(
+      County,
+      State,
+      Population_2022,
+      Ian_Damage_Sum,
+      Ian_Event_Records,
+      Positive_Damage_Records,
+      Damage_Per_Capita,
+      Log_Damage_Per_Capita
+    ),
+
+  "results/ian_damage_by_county.csv"
+)
+
+
+cat(
+  "\nSaved local analytical object to:",
+  "data/ian_damage_per_capita.rds",
+  "\n"
+)
+
+cat(
+  "Saved GitHub results table to:",
+  "results/ian_damage_by_county.csv",
+  "\n"
+)
+
+cat(
+  "\n02_build_ian_damage.R completed successfully.\n"
+)
