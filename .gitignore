@@ -1,0 +1,26 @@
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# RStudio
+*.Rproj
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# Raw / intermediate datasets
+data/*.csv
+data/*.csv.gz
+data/*.xlsx
+data/*.rds
+
+# Keep documentation inside data/
+!data/README.md
