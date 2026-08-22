@@ -1,7 +1,5 @@
 # ==============================================================================
-# 02_build_ian_damage.R
-#
-# Hurricane Ian Housing Resilience Project
+# build_ian_damage.R
 #
 # Input:
 #   data/panel_clean.rds
