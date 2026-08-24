@@ -45,7 +45,7 @@ The ensemble achieved the strongest out-of-sample performance:
 
 ## Model Performance
 
-![Model Performance](figures/model_performance.png)
+![Model Performance](figures_tables/model_performance.png)
 
 | Model | CV RMSE | CV MAE | CV R² |
 |---|---:|---:|---:|
