@@ -268,23 +268,15 @@ The predictive models identify relationships useful for forecasting and benchmar
 
 ## Key Takeaway
 
-Pre-Ian housing-market conditions contain meaningful information about
-subsequent county housing resilience. A cross-validated ensemble explains about
-**53% of held-out variation** across the broader southeastern sample, with
-recent housing appreciation and volatility among the strongest predictors.
+There is a notable degree of heterogeneity among hurricane-affected counties. Charlotte, Lee, Manatee, and Sarasota County all underperformed while Seminole, Hardee, Hendry, and Okeechobee County were more resilient. There wasn’t one uniform effect from Hurricane Ian. 
 
-When the 20 Hurricane Ian-exposed Florida counties are excluded entirely from
-model training, several heavily damaged markets—especially Charlotte, Lee,
-Sarasota, and Manatee—substantially underperform their predicted resilience.
+Severe physical damage from Ian was associated with weaker-than-expected performance. Counties that experienced the most damage showed much lower resilience, showing that disaster exposure does matter to some degree. However, the continuous relationship is noisy, suggesting the presence of other economic factors.
 
-Across the Ian counties, greater NOAA property damage is directionally
-associated with lower unexpected resilience. The continuous relationship is
-imprecisely estimated in the small 20-county sample, while the five
-highest-damage counties show substantially lower unexpected resilience in an
-exploratory group comparison.
+In particular, resilience seems to heavily depend on pre-existing short-run market conditions and price volatility. I also considered that sharp appreciations pre-hurricane may just give those countries “more room to fall” compared to counties that had a long-run built-in appreciation. 
+However, an interesting example is Sarasota County, which sustained significant physical damage and showed low resilience. However, this is in line with the existing post-pandemic housing slowdown, driven by a sharp increase in interest rates and inflated prices that likely priced many buyers out of the market. 
 
-These conclusions remain essentially unchanged when Alabama is removed from
-the benchmark training sample.
+This leads me to consider the possibility that disaster exposure is simply being drowned out by larger, more standard housing market variables, raising interesting questions about how heavily Americans factor in future disaster exposure when buying homes in high-demand areas. 
+
 
 ---
 
